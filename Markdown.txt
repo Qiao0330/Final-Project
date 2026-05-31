@@ -1,0 +1,770 @@
+```markdown
+# 德州撲克 Preflop Solver 專案共同規格
+
+本專案採用 **common.h 版本**。  
+所有共同 enum / struct 都放在 `common.h`。  
+其他 header 不可以重複定義 `Suit`、`Rank`、`Card`、`HoleCards`、`Position`、`Action`。
+
+---
+
+## 1. 專案目標
+
+本專案目標是製作：
+
+```text
+六人制德州撲克翻前 GTO-inspired decision system
+```
+
+英文說法：
+
+```text
+Six-max Texas Hold'em preflop GTO-inspired decision system
+```
+
+本專案不是完整 GTO Wizard，也不是完整 GTO solver。  
+我們只做 **preflop / 翻前**，固定 **six-max / 六人桌**，使用簡化的 range、Monte Carlo equity estimation，以及 EV-based decision model 來推薦行動。
+
+---
+
+## 2. 專案範圍
+
+固定遵守以下範圍：
+
+- 只處理 preflop，不處理 flop / turn / river。
+- 固定六人桌。
+- Hero 有兩張手牌。
+- 最多 5 個對手。
+- 輸出建議行動：`fold` / `call` / `raise`。
+- 核心程式使用 C 語言。
+- 可以使用 AI 協助開發，但人要負責規格、整合、測試、debug 與解釋。
+
+---
+
+## 3. 專案不是什麼
+
+請不要把專案說成或做成以下內容：
+
+- 不是完整 GTO solver。
+- 不需要做完整 no-limit betting tree。
+- 不需要保證結果和 GTO Wizard 一樣。
+- 不處理 postflop。
+- 不處理所有 raise sizing。
+- 不需要從零訓練 AI 模型。
+- 不要讓每個模組各自發明不同的資料格式。
+
+我們的定位是：
+
+```text
+preflop decision assistant
+GTO-inspired
+EV-based
+Monte Carlo equity estimation
+six-max only
+```
+
+---
+
+## 4. 分工
+
+目前分工：
+
+```text
+A：solver
+B：card + equity
+C：range + UI + integration
+```
+
+對應檔案：
+
+```text
+A：
+solver.h
+solver.c
+
+B：
+card.h
+card.c
+equity.h
+equity.c
+
+C：
+range.h
+range.c
+ui.h
+ui.c
+main.c
+
+共同：
+common.h
+```
+
+---
+
+## 5. 建議檔案結構
+
+```text
+common.h
+main.c
+card.h
+card.c
+range.h
+range.c
+equity.h
+equity.c
+solver.h
+solver.c
+ui.h
+ui.c
+```
+
+每個模組只做自己的事。
+
+---
+
+## 6. 模組資料流
+
+整體資料流：
+
+```text
+使用者輸入
+  ↓
+UI 產生 SolverInput
+  ↓
+solver 呼叫 range / equity
+  ↓
+equity 回傳勝率
+  ↓
+solver 計算 EV
+  ↓
+solver 回傳 SolverResult
+  ↓
+UI 顯示結果
+```
+
+主流程大概會像這樣：
+
+```c
+SolverInput input = read_solver_input();
+SolverResult result = solve_preflop_decision(input);
+print_solver_result(result);
+```
+
+---
+
+## 7. 最重要共同規則
+
+所有人與 AI 都必須遵守：
+
+1. 所有共同 enum / struct 只放在 `common.h`。
+2. 其他 `.h` 不可以重複定義 `Suit`、`Rank`、`Card`、`HoleCards`、`Position`、`Action`。
+3. 不要亂改別人的 `.h` 檔。
+4. 如果要改 `.h`，要先三個人討論同意。
+5. `.h` 是模組合約，`.c` 必須遵守 `.h`。
+6. UI 不可以寫 EV 邏輯。
+7. solver 不可以處理 `scanf` 或使用者輸入。
+8. equity 不可以印畫面或處理 UI。
+9. range 不可以直接決定最終推薦動作。
+10. card 模組只處理牌的表示、解析與合法性。
+11. 每個模組至少要有簡單測試案例。
+12. 不要各自發明新的 `Card`、`HoleCards`、`Position`、`Action` 格式。
+13. function 名稱、struct 名稱、enum 名稱要以共同 header 為準。
+14. 每個模組要能單獨解釋：輸入是什麼、輸出是什麼、限制是什麼。
+
+---
+
+# 8. common.h 規格
+
+`common.h` 放所有模組共用的 enum / struct。
+
+```c
+#ifndef COMMON_H
+#define COMMON_H
+
+typedef enum {
+    SUIT_CLUBS,
+    SUIT_DIAMONDS,
+    SUIT_HEARTS,
+    SUIT_SPADES,
+    SUIT_INVALID
+} Suit;
+
+typedef enum {
+    RANK_2 = 2,
+    RANK_3,
+    RANK_4,
+    RANK_5,
+    RANK_6,
+    RANK_7,
+    RANK_8,
+    RANK_9,
+    RANK_T = 10,
+    RANK_J,
+    RANK_Q,
+    RANK_K,
+    RANK_A,
+    RANK_INVALID
+} Rank;
+
+typedef enum {
+    POS_UTG,
+    POS_HJ,
+    POS_CO,
+    POS_BTN,
+    POS_SB,
+    POS_BB,
+    POS_INVALID
+} Position;
+
+typedef enum {
+    ACTION_FOLD,
+    ACTION_CALL,
+    ACTION_RAISE
+} Action;
+
+typedef struct {
+    Rank rank;
+    Suit suit;
+} Card;
+
+typedef struct {
+    Card card1;
+    Card card2;
+} HoleCards;
+
+#endif
+```
+
+注意：
+
+- `common.h` 不負責宣告函式。
+- `common.h` 不 include 其他專案 header。
+- 其他 header 如果需要共同型別，就 `#include "common.h"`。
+
+---
+
+# 9. card 模組規格
+
+## card.h
+
+```c
+#ifndef CARD_H
+#define CARD_H
+
+#include "common.h"
+
+int parse_card(const char *text, Card *card);
+int parse_hole_cards(const char *text1, const char *text2, HoleCards *hand);
+int is_same_card(Card a, Card b);
+void card_to_string(Card card, char *buffer);
+
+#endif
+```
+
+## card 模組負責
+
+- 解析單張牌。
+- 解析兩張手牌。
+- 檢查牌是否合法。
+- 檢查兩張牌是否重複。
+- 把 `Card` 轉回字串。
+
+## card 模組不負責
+
+- 不負責計算 equity。
+- 不負責決定 action。
+- 不負責 UI 輸入輸出。
+- 不負責 position range。
+
+---
+
+# 10. range 模組規格
+
+## range.h
+
+```c
+#ifndef RANGE_H
+#define RANGE_H
+
+#include "common.h"
+
+typedef struct {
+    char name[4];      // e.g. "AA", "AKs", "KQo"
+} HandClass;
+
+typedef struct {
+    double open_frequency;   // 0.0 to 1.0
+    double call_frequency;   // 0.0 to 1.0
+    double raise_frequency;  // 0.0 to 1.0
+} RangeActionFrequency;
+
+HandClass get_hand_class(HoleCards hand);
+int is_hand_in_open_range(Position pos, HandClass hand_class);
+RangeActionFrequency get_preflop_frequency(Position pos, HandClass hand_class);
+const char *position_to_string(Position pos);
+
+#endif
+```
+
+## range 模組負責
+
+- 把兩張手牌轉成 169 hand class。
+- 根據位置回傳簡化 preflop range。
+- 提供位置名稱轉換。
+- 回傳不同位置對某 hand class 的簡化行動頻率。
+
+## range 模組不負責
+
+- 不負責解析 `Ah`、`Ks`。
+- 不負責 Monte Carlo 模擬。
+- 不負責最終 EV 推薦。
+- 不負責使用者輸入輸出。
+
+---
+
+# 11. Hand Class 規則
+
+翻前手牌分類使用 169 種 hand class：
+
+```text
+AA
+KK
+QQ
+AKs
+AKo
+KQs
+KQo
+77
+T9s
+```
+
+規則：
+
+- Pair 不加 `s` 或 `o`。
+- 同花加 `s`。
+- 不同花加 `o`。
+- 大牌在前，小牌在後。
+
+例子：
+
+```text
+Ah Kh -> AKs
+Kh Ah -> AKs
+As Kd -> AKo
+7c 7d -> 77
+Td 9d -> T9s
+9d Td -> T9s
+```
+
+---
+
+# 12. equity 模組規格
+
+## equity.h
+
+```c
+#ifndef EQUITY_H
+#define EQUITY_H
+
+#include "common.h"
+#include "range.h"
+
+typedef struct {
+    int simulations;
+    int wins;
+    int ties;
+    int losses;
+    double win_rate;
+    double tie_rate;
+    double loss_rate;
+    double equity;
+} EquityResult;
+
+typedef struct {
+    HoleCards hero_hand;
+    int opponent_count;       // six-max max = 5
+    int simulations;
+} EquityInput;
+
+EquityResult estimate_preflop_equity(EquityInput input);
+
+#endif
+```
+
+## equity 模組負責
+
+- Monte Carlo 模擬。
+- 發隨機對手手牌與公共牌。
+- 避免重複牌。
+- 評估 hero 的 win / tie / loss。
+- 回傳 equity 結果。
+
+## equity 定義
+
+```text
+Equity = (wins + 0.5 * ties) / simulations
+```
+
+MVP 版本可以先做：
+
+```text
+Hero hand vs random 5 opponents
+```
+
+進階版本再做：
+
+```text
+Hero hand vs opponent ranges by position
+```
+
+## equity 模組不負責
+
+- 不負責讀取使用者輸入。
+- 不負責印結果。
+- 不負責推薦 fold / call / raise。
+- 不負責 UI。
+
+---
+
+# 13. solver 模組規格
+
+## solver.h
+
+```c
+#ifndef SOLVER_H
+#define SOLVER_H
+
+#include "common.h"
+#include "equity.h"
+#include "range.h"
+
+typedef struct {
+    Position hero_position;
+    HoleCards hero_hand;
+
+    double pot_size;
+    double call_amount;
+    double raise_amount;
+    double fold_probability;
+
+    int opponent_count;
+    int simulations;
+} SolverInput;
+
+typedef struct {
+    double equity;
+
+    double ev_fold;
+    double ev_call;
+    double ev_raise;
+
+    Action recommendation;
+    char explanation[256];
+} SolverResult;
+
+SolverResult solve_preflop_decision(SolverInput input);
+const char *action_to_string(Action action);
+
+#endif
+```
+
+## solver 模組負責
+
+- 呼叫 equity 模組取得 equity。
+- 可呼叫 range 模組取得 hand class 或 position frequency。
+- 計算 fold / call / raise 的 EV。
+- 選出最高 EV 的 action。
+- 產生簡短 explanation。
+
+## solver 模組不負責
+
+- 不負責 `scanf`。
+- 不負責 CLI menu。
+- 不負責解析牌字串。
+- 不負責 Monte Carlo 細節。
+- 不負責直接印結果。
+
+---
+
+# 14. 共同 EV 公式
+
+本專案使用簡化 EV model：
+
+```text
+EV_fold = 0
+
+EV_call = equity * final_pot - call_amount
+
+EV_raise =
+    fold_probability * current_pot
+    + (1 - fold_probability)
+      * (equity * final_pot_after_raise - raise_amount)
+```
+
+注意：
+
+- 這不是完整 GTO。
+- 這是 simplified GTO-inspired EV model。
+- 報告時要誠實說明這是簡化模型。
+
+---
+
+# 15. ui 模組規格
+
+## ui.h
+
+```c
+#ifndef UI_H
+#define UI_H
+
+#include "solver.h"
+
+void run_main_menu(void);
+SolverInput read_solver_input(void);
+void print_solver_result(SolverResult result);
+void print_input_guide(void);
+
+#endif
+```
+
+## UI 模組負責
+
+- 顯示主選單。
+- 顯示輸入格式說明。
+- 讀取使用者輸入。
+- 把輸入整理成 `SolverInput`。
+- 顯示 `SolverResult`。
+
+## UI 模組不負責
+
+- 不負責 EV 計算。
+- 不負責 Monte Carlo。
+- 不負責手牌分類核心邏輯。
+- 不負責 position range 計算。
+
+---
+
+# 16. main.c 規格
+
+`main.c` 只負責啟動程式。
+
+建議內容：
+
+```c
+#include "ui.h"
+
+int main(void) {
+    run_main_menu();
+    return 0;
+}
+```
+
+`main.c` 不應該直接處理 solver 細節。
+
+---
+
+# 17. 共同輸入格式
+
+牌的輸入格式固定為：
+
+```text
+Ah = Ace of hearts
+Ks = King of spades
+Qd = Queen of diamonds
+Tc = Ten of clubs
+```
+
+Rank：
+
+```text
+2 3 4 5 6 7 8 9 T J Q K A
+```
+
+Suit：
+
+```text
+c = clubs
+d = diamonds
+h = hearts
+s = spades
+```
+
+合法例子：
+
+```text
+Ah Ks
+Td Tc
+7c 2d
+As Kd
+```
+
+非法例子：
+
+```text
+1h
+Ah Ah
+ZZ
+As As
+Kx
+10h
+```
+
+注意：`Ten of hearts` 請使用 `Th`，不要使用 `10h`。
+
+---
+
+# 18. range 假設
+
+位置 range 使用簡化版本：
+
+```text
+UTG 最緊
+HJ 稍寬
+CO 更寬
+BTN 最寬
+SB 視情況
+BB 防守較寬
+```
+
+可以在報告中說：
+
+```text
+We used simplified position-based preflop ranges inspired by common six-max poker strategy.
+```
+
+---
+
+# 19. 整合順序
+
+建議整合順序：
+
+```text
+1. B 完成 card
+2. C 完成 range
+3. A 先用 fake equity 完成 solver
+4. B 完成 equity
+5. C 完成 UI
+6. main.c 串起來
+7. 測試 demo cases
+8. 美化輸出與簡報
+```
+
+A 不需要等 B 的 Monte Carlo 完成。  
+A 可以先用假 equity 測試 EV，例如：
+
+```c
+double equity = 0.45;
+```
+
+等 equity 模組完成後再接上。
+
+---
+
+# 20. 測試要求
+
+每個模組至少要有簡單測試。
+
+## card 測試
+
+```text
+Ah -> valid
+Th -> valid
+10h -> invalid
+Kx -> invalid
+Ah Ah -> duplicate
+```
+
+## range 測試
+
+```text
+Ah Kh -> AKs
+Kh Ah -> AKs
+As Kd -> AKo
+7c 7d -> 77
+9d Td -> T9s
+```
+
+## equity 測試
+
+```text
+AA 的 equity 應該比 72o 高
+增加 simulations 後結果應該更穩定
+不可以發出重複牌
+```
+
+## solver 測試
+
+```text
+如果 call_amount 很大，call EV 應下降
+如果 equity 很高，call / raise EV 應上升
+如果 fold_probability 很高，raise EV 應上升
+```
+
+## UI 測試
+
+```text
+非法輸入要能重新輸入
+結果要清楚顯示 equity、EV、recommendation
+```
+
+---
+
+# 21. 問 AI 時的規則
+
+不要問：
+
+```text
+幫我寫一個完整 GTO solver
+```
+
+請改成：
+
+```text
+請根據以下 header 實作 solver.c。
+不要修改 header。
+只實作 solver 模組。
+不要處理 scanf。
+不要寫 UI。
+請附上簡單測試案例。
+```
+
+或：
+
+```text
+請根據以下 card.h 實作 card.c。
+不要修改 public interface。
+請處理 Ah、Ks、Tc 這種格式。
+10h 應視為 invalid。
+請檢查 duplicate card。
+```
+
+每次問 AI 都要貼上：
+
+```text
+1. common.h
+2. 自己負責的 header
+3. 本份共同規格中對應的模組規則
+```
+
+---
+
+# 22. 報告共同說法
+
+英文：
+
+```text
+Our project is a six-max preflop decision system written mainly in C.
+It uses card parsing, preflop hand classification, simplified position ranges,
+Monte Carlo equity estimation, and an EV-based solver to recommend fold, call,
+or raise. It is not a full GTO solver, but a GTO-inspired model designed for a
+feasible final project scope.
+```
+
+中文：
+
+```text
+我們的專題是一個以 C 語言為主的六人制德州撲克翻前決策系統。
+系統會解析手牌、進行翻前手牌分類、使用簡化的位置 range，
+透過 Monte Carlo 模擬估算勝率，最後用 EV 模型推薦 fold、call 或 raise。
+本專題不是完整 GTO solver，而是在期末專題可完成範圍內設計的 GTO-inspired 模型。
+```
+```
