@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from card import parse_hole_cards
 from common import Action, HoleCards, PlayerAction, Position
 from range_model import opening_range_summary, position_to_string
@@ -7,6 +9,22 @@ from solver import SolverInput, SolverResult, action_to_string, solve_preflop_de
 
 
 POSITIONS = (Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB)
+
+
+@dataclass(frozen=True)
+class HeroDecisionContext:
+    pot_size: float
+    call_amount: float
+    raise_amount: float
+    table_actions_before_decision: tuple[PlayerAction, ...]
+    active_opponent_count: int
+
+
+def _active_opponent_count(hero_position: Position, folded: set[Position]) -> int:
+    return len([
+        position for position in POSITIONS
+        if position != hero_position and position not in folded
+    ])
 
 
 def _read_int_range(prompt: str, minimum: int, maximum: int) -> int:
@@ -62,54 +80,177 @@ def _read_position() -> Position:
     return Position(choice - 1)
 
 
-def _read_player_action(position: Position) -> Action:
+def _read_player_action(position: Position, to_call: float) -> Action:
     print(f"\n{position_to_string(position)} action")
-    print("1. Fold")
-    print("2. Call")
-    print("3. Raise")
+    if to_call > 0.0:
+        print(f"To call: {to_call:.2f} BB")
+        print("1. Fold")
+        print("2. Call")
+        print("3. Raise")
 
-    choice = _read_int_range("Choose action: ", 1, 3)
+        choice = _read_int_range("Choose action: ", 1, 3)
+        return {
+            1: Action.FOLD,
+            2: Action.CALL,
+            3: Action.RAISE,
+        }[choice]
+
+    print("1. Check")
+    print("2. Raise")
+
+    choice = _read_int_range("Choose action: ", 1, 2)
     return {
-        1: Action.FOLD,
-        2: Action.CALL,
-        3: Action.RAISE,
+        1: Action.CHECK,
+        2: Action.RAISE,
     }[choice]
 
 
-def _read_prior_actions(hero_position: Position, starting_pot: float) -> tuple[tuple[PlayerAction, ...], float, float]:
-    records: list[PlayerAction] = []
-    pot_size = starting_pot
-    current_bet = 0.0
+def _read_raise_total(position: Position, current_bet: float, current_contribution: float) -> float:
+    while True:
+        total = _read_float_min(
+            f"New total bet for {position_to_string(position)} after raise: ",
+            0.0,
+        )
+        if total > current_bet and total >= current_contribution:
+            return total
 
-    print("\nPreflop action order")
-    print("--------------------")
+        print(f"Invalid raise. Total bet must be greater than current bet {current_bet:.2f}.")
 
+
+def _active_positions(folded: set[Position]) -> list[Position]:
+    return [position for position in POSITIONS if position not in folded]
+
+
+def _betting_is_closed(folded: set[Position], contributions: dict[Position, float], current_bet: float, acted: set[Position]) -> bool:
+    active = _active_positions(folded)
+    if len(active) <= 1:
+        return True
+
+    return all(
+        contributions[position] == current_bet and position in acted
+        for position in active
+    )
+
+
+def _next_position_index(index: int) -> int:
+    return (index + 1) % len(POSITIONS)
+
+
+def _print_table_state(pot_size: float, current_bet: float, contributions: dict[Position, float], folded: set[Position]) -> None:
+    print("\nCurrent table state")
+    print("-------------------")
+    print(f"Pot: {pot_size:.2f} BB")
+    print(f"Current bet to match: {current_bet:.2f} BB")
     for position in POSITIONS:
+        state = "folded" if position in folded else "active"
+        print(f"  {position_to_string(position)}: {contributions[position]:.2f} BB ({state})")
+
+
+def _print_action_summary(records: list[PlayerAction]) -> None:
+    print("\nCompleted preflop action summary")
+    print("--------------------------------")
+    if not records:
+        print("No voluntary actions entered.")
+        return
+
+    for record in records:
+        amount = ""
+        if record.amount > 0.0:
+            prefix = "+" if record.action == Action.RAISE else ""
+            amount = f" {prefix}{record.amount:.2f}"
+        print(f"  {position_to_string(record.position)} {action_to_string(record.action)}{amount}")
+
+
+def _read_complete_preflop_actions(hero_position: Position) -> tuple[HeroDecisionContext, tuple[PlayerAction, ...]]:
+    contributions = {position: 0.0 for position in POSITIONS}
+    folded: set[Position] = set()
+    acted: set[Position] = set()
+    records: list[PlayerAction] = []
+
+    contributions[Position.SB] = 0.5
+    contributions[Position.BB] = 1.0
+    pot_size = 1.5
+    current_bet = 1.0
+    last_hero_context: HeroDecisionContext | None = None
+    last_hero_pot_size = 0.0
+    last_hero_call_amount = 0.0
+    last_hero_raise_amount = 0.0
+
+    print("\nBlinds posted automatically")
+    print("---------------------------")
+    print("SB posts 0.50 BB")
+    print("BB posts 1.00 BB")
+
+    index = 0
+    while not _betting_is_closed(folded, contributions, current_bet, acted):
+        position = POSITIONS[index]
+
+        if position in folded:
+            index = _next_position_index(index)
+            continue
+
+        if contributions[position] == current_bet and position in acted:
+            index = _next_position_index(index)
+            continue
+
+        _print_table_state(pot_size, current_bet, contributions, folded)
+        to_call = max(0.0, current_bet - contributions[position])
+
         if position == hero_position:
-            print(f"\nHero decision point reached at {position_to_string(hero_position)}.")
-            break
+            print(f"\nHero decision point at {position_to_string(hero_position)}.")
+            last_hero_pot_size = pot_size
+            last_hero_call_amount = to_call
+            last_hero_raise_amount = 0.0
 
-        action = _read_player_action(position)
-        amount = 0.0
+        action = _read_player_action(position, to_call)
+        amount_added = 0.0
 
-        if action == Action.CALL:
-            prompt = (
-                f"Amount {position_to_string(position)} adds to pot by calling"
-                f" (current bet is {current_bet:.2f}): "
-            )
-            amount = _read_float_min(prompt, 0.0)
-            pot_size += amount
+        if action == Action.FOLD:
+            folded.add(position)
+        elif action in (Action.CALL, Action.CHECK):
+            amount_added = to_call
+            contributions[position] += amount_added
+            pot_size += amount_added
         elif action == Action.RAISE:
-            amount = _read_float_min(
-                f"Total amount {position_to_string(position)} puts in with raise/open: ",
-                0.0,
+            new_total = _read_raise_total(position, current_bet, contributions[position])
+            amount_added = new_total - contributions[position]
+            contributions[position] = new_total
+            pot_size += amount_added
+            current_bet = new_total
+            acted = set()
+            if position == hero_position:
+                last_hero_raise_amount = amount_added
+
+        acted.add(position)
+        records.append(PlayerAction(position=position, action=action, amount=amount_added))
+        if position == hero_position:
+            last_hero_context = HeroDecisionContext(
+                pot_size=last_hero_pot_size,
+                call_amount=last_hero_call_amount,
+                raise_amount=last_hero_raise_amount,
+                table_actions_before_decision=tuple(records),
+                active_opponent_count=_active_opponent_count(hero_position, folded),
             )
-            pot_size += amount
-            current_bet = amount
+        index = _next_position_index(index)
 
-        records.append(PlayerAction(position=position, action=action, amount=amount))
+    if last_hero_context is None:
+        to_call = max(0.0, current_bet - contributions[hero_position])
+        last_hero_context = HeroDecisionContext(
+            pot_size=pot_size,
+            call_amount=to_call,
+            raise_amount=0.0,
+            table_actions_before_decision=tuple(records),
+            active_opponent_count=_active_opponent_count(hero_position, folded),
+        )
 
-    return tuple(records), pot_size, current_bet
+    _print_action_summary(records)
+    return HeroDecisionContext(
+        pot_size=last_hero_context.pot_size,
+        call_amount=last_hero_context.call_amount,
+        raise_amount=last_hero_context.raise_amount,
+        table_actions_before_decision=tuple(records),
+        active_opponent_count=_active_opponent_count(hero_position, folded),
+    ), tuple(records)
 
 
 def run_main_menu() -> None:
@@ -139,19 +280,19 @@ def read_solver_input() -> SolverInput:
     print("---------------------")
 
     hero_position = _read_position()
-    starting_pot = _read_float_min("Starting pot size before preflop actions: ", 0.0)
-    prior_actions, pot_size, call_amount = _read_prior_actions(hero_position, starting_pot)
+    decision_context, table_actions = _read_complete_preflop_actions(hero_position)
     hero_hand = _read_hole_cards()
-    raise_prompt = "Hero raise amount: " if call_amount > 0.0 else "Hero open raise amount: "
+    simulations = _read_int_range("Simulation count (1-1000000): ", 1, 1_000_000)
 
     return SolverInput(
         hero_position=hero_position,
         hero_hand=hero_hand,
-        pot_size=pot_size,
-        call_amount=call_amount,
-        raise_amount=_read_float_min(raise_prompt, 0.0),
-        simulations=_read_int_range("Simulation count (1-1000000): ", 1, 1_000_000),
-        prior_actions=prior_actions,
+        pot_size=decision_context.pot_size,
+        call_amount=decision_context.call_amount,
+        raise_amount=decision_context.raise_amount,
+        simulations=simulations,
+        table_actions=decision_context.table_actions_before_decision,
+        active_opponent_count=decision_context.active_opponent_count,
     )
 
 
@@ -159,16 +300,17 @@ def print_solver_result(result: SolverResult) -> None:
     print("\nResult")
     print("------")
     print(f"Hero position: {position_to_string(result.hero_position)}")
-    if result.prior_actions:
-        print("Prior actions:")
-        for record in result.prior_actions:
+    if result.table_actions:
+        print("Entered actions:")
+        for record in result.table_actions:
             print(
                 f"  {position_to_string(record.position)} "
                 f"{action_to_string(record.action)}"
-                f"{f' {record.amount:.2f}' if record.amount > 0.0 else ''}"
+                f"{f' +{record.amount:.2f}' if record.amount > 0.0 and record.action == Action.RAISE else ''}"
+                f"{f' {record.amount:.2f}' if record.amount > 0.0 and record.action != Action.RAISE else ''}"
             )
     else:
-        print("Prior actions: none")
+        print("Entered actions: none")
     print(f"Estimated opponents: {result.opponent_count}")
     print(f"Hand class:    {result.hand_class.name}")
     print(f"In open range: {'yes' if result.range_frequency.open_frequency > 0.0 else 'no'}")
@@ -200,13 +342,11 @@ def print_input_guide() -> None:
     print("Valid examples: Ah, Ks, Qd, Tc, 7c")
     print("Invalid examples: 10h, Kx, ZZ, duplicated cards like Ah Ah")
     print()
-    print("Players before hero are treated as folded.")
     print("In a new analysis, actions are entered in order: UTG, HJ, CO, BTN, SB, BB.")
-    print("Input stops when the sequence reaches hero's position.")
-    print("Players who call or raise before hero are counted as active opponents.")
-    print("Players behind hero are also counted as possible opponents: BTN has SB and BB behind.")
-    print("Pot size, action amounts, and raise amount cannot be negative.")
-    print("Fold probability is estimated automatically from opponent EV versus hero open range.")
+    print("SB and BB are posted automatically as 0.50 BB and 1.00 BB.")
+    print("Calls automatically add only the amount needed to match the current highest bet.")
+    print("If a player raises, earlier active players will get another decision.")
+    print("The betting loop ends only when every active player has matched the highest bet or folded.")
     print_opening_ranges()
 
 

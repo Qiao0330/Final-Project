@@ -5,14 +5,25 @@ decision system.
 
 ## Overview
 
-The program analyzes a preflop situation where action has folded to the hero.
+The program analyzes a preflop situation by entering actions in table order:
+UTG, HJ, CO, BTN, SB, and BB. It now uses a full preflop betting loop:
+
+- SB and BB are posted automatically as 0.50 BB and 1.00 BB.
+- The pot size is tracked automatically.
+- Calls automatically add only the amount needed to match the current highest bet.
+- If a player raises, earlier active players receive another decision.
+- Hero can receive multiple decision previews, such as facing a 3-bet after opening.
+- Hero hole cards and simulation count are entered after the betting action is complete.
+
 It considers:
 
 - hero position
 - hero hole cards
-- players behind the hero
+- actions before and after hero
+- active opponents based on entered call/raise actions
+- automatic blind and pot tracking
 - position-based opening range frequency
-- automatically estimated opponent fold probability
+- fold probability based on entered post-hero actions
 - Monte Carlo equity estimation
 - EV comparison for fold, call, and raise
 

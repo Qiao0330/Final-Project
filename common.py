@@ -41,6 +41,7 @@ class Action(IntEnum):
     FOLD = 0
     CALL = 1
     RAISE = 2
+    CHECK = 3
 
 
 @dataclass(frozen=True)

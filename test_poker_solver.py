@@ -144,11 +144,47 @@ def test_solver_counts_position_order_context():
                 PlayerAction(Position.HJ, Action.FOLD, 0.0),
                 PlayerAction(Position.CO, Action.FOLD, 0.0),
             ),
+            table_actions=(
+                PlayerAction(Position.UTG, Action.FOLD, 0.0),
+                PlayerAction(Position.HJ, Action.FOLD, 0.0),
+                PlayerAction(Position.CO, Action.FOLD, 0.0),
+                PlayerAction(Position.BTN, Action.RAISE, 2.5),
+                PlayerAction(Position.SB, Action.FOLD, 0.0),
+                PlayerAction(Position.BB, Action.FOLD, 0.0),
+            ),
         )
     )
-    assert folded_to_button.opponent_count == 2
+    assert folded_to_button.opponent_count == 0
+    assert folded_to_button.fold_probability == 1.0
 
-    facing_cutoff_raise = solve_preflop_decision(
+    small_blind_calls = solve_preflop_decision(
+        SolverInput(
+            hero_position=Position.BTN,
+            hero_hand=hand,
+            pot_size=1.5,
+            call_amount=0.0,
+            raise_amount=2.5,
+            simulations=10,
+            prior_actions=(
+                PlayerAction(Position.UTG, Action.FOLD, 0.0),
+                PlayerAction(Position.HJ, Action.FOLD, 0.0),
+                PlayerAction(Position.CO, Action.FOLD, 0.0),
+            ),
+            table_actions=(
+                PlayerAction(Position.UTG, Action.FOLD, 0.0),
+                PlayerAction(Position.HJ, Action.FOLD, 0.0),
+                PlayerAction(Position.CO, Action.FOLD, 0.0),
+                PlayerAction(Position.BTN, Action.RAISE, 2.5),
+                PlayerAction(Position.SB, Action.CALL, 2.5),
+                PlayerAction(Position.BB, Action.FOLD, 0.0),
+            ),
+            future_contribution=2.5,
+        )
+    )
+    assert small_blind_calls.opponent_count == 1
+    assert small_blind_calls.fold_probability == 0.5
+
+    facing_cutoff_raise_and_small_blind_call = solve_preflop_decision(
         SolverInput(
             hero_position=Position.BTN,
             hero_hand=hand,
@@ -161,9 +197,18 @@ def test_solver_counts_position_order_context():
                 PlayerAction(Position.HJ, Action.FOLD, 0.0),
                 PlayerAction(Position.CO, Action.RAISE, 2.5),
             ),
+            table_actions=(
+                PlayerAction(Position.UTG, Action.FOLD, 0.0),
+                PlayerAction(Position.HJ, Action.FOLD, 0.0),
+                PlayerAction(Position.CO, Action.RAISE, 2.5),
+                PlayerAction(Position.BTN, Action.RAISE, 5.5),
+                PlayerAction(Position.SB, Action.CALL, 8.0),
+                PlayerAction(Position.BB, Action.FOLD, 0.0),
+            ),
+            future_contribution=8.0,
         )
     )
-    assert facing_cutoff_raise.opponent_count == 3
+    assert facing_cutoff_raise_and_small_blind_call.opponent_count == 2
 
 
 if __name__ == "__main__":
