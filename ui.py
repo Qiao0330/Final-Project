@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from card import parse_hole_cards
-from common import HoleCards, Position
+from common import Action, HoleCards, PlayerAction, Position
 from range_model import opening_range_summary, position_to_string
 from solver import SolverInput, SolverResult, action_to_string, solve_preflop_decision
+
+
+POSITIONS = (Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB)
 
 
 def _read_int_range(prompt: str, minimum: int, maximum: int) -> int:
@@ -59,6 +62,56 @@ def _read_position() -> Position:
     return Position(choice - 1)
 
 
+def _read_player_action(position: Position) -> Action:
+    print(f"\n{position_to_string(position)} action")
+    print("1. Fold")
+    print("2. Call")
+    print("3. Raise")
+
+    choice = _read_int_range("Choose action: ", 1, 3)
+    return {
+        1: Action.FOLD,
+        2: Action.CALL,
+        3: Action.RAISE,
+    }[choice]
+
+
+def _read_prior_actions(hero_position: Position, starting_pot: float) -> tuple[tuple[PlayerAction, ...], float, float]:
+    records: list[PlayerAction] = []
+    pot_size = starting_pot
+    current_bet = 0.0
+
+    print("\nPreflop action order")
+    print("--------------------")
+
+    for position in POSITIONS:
+        if position == hero_position:
+            print(f"\nHero decision point reached at {position_to_string(hero_position)}.")
+            break
+
+        action = _read_player_action(position)
+        amount = 0.0
+
+        if action == Action.CALL:
+            prompt = (
+                f"Amount {position_to_string(position)} adds to pot by calling"
+                f" (current bet is {current_bet:.2f}): "
+            )
+            amount = _read_float_min(prompt, 0.0)
+            pot_size += amount
+        elif action == Action.RAISE:
+            amount = _read_float_min(
+                f"Total amount {position_to_string(position)} puts in with raise/open: ",
+                0.0,
+            )
+            pot_size += amount
+            current_bet = amount
+
+        records.append(PlayerAction(position=position, action=action, amount=amount))
+
+    return tuple(records), pot_size, current_bet
+
+
 def run_main_menu() -> None:
     while True:
         print()
@@ -85,13 +138,20 @@ def read_solver_input() -> SolverInput:
     print("\nNew decision analysis")
     print("---------------------")
 
+    hero_position = _read_position()
+    starting_pot = _read_float_min("Starting pot size before preflop actions: ", 0.0)
+    prior_actions, pot_size, call_amount = _read_prior_actions(hero_position, starting_pot)
+    hero_hand = _read_hole_cards()
+    raise_prompt = "Hero raise amount: " if call_amount > 0.0 else "Hero open raise amount: "
+
     return SolverInput(
-        hero_position=_read_position(),
-        hero_hand=_read_hole_cards(),
-        pot_size=_read_float_min("Current pot size: ", 0.0),
-        call_amount=_read_float_min("Call amount: ", 0.0),
-        raise_amount=_read_float_min("Raise amount: ", 0.0),
+        hero_position=hero_position,
+        hero_hand=hero_hand,
+        pot_size=pot_size,
+        call_amount=call_amount,
+        raise_amount=_read_float_min(raise_prompt, 0.0),
         simulations=_read_int_range("Simulation count (1-1000000): ", 1, 1_000_000),
+        prior_actions=prior_actions,
     )
 
 
@@ -99,7 +159,17 @@ def print_solver_result(result: SolverResult) -> None:
     print("\nResult")
     print("------")
     print(f"Hero position: {position_to_string(result.hero_position)}")
-    print(f"Players behind: {result.opponent_count}")
+    if result.prior_actions:
+        print("Prior actions:")
+        for record in result.prior_actions:
+            print(
+                f"  {position_to_string(record.position)} "
+                f"{action_to_string(record.action)}"
+                f"{f' {record.amount:.2f}' if record.amount > 0.0 else ''}"
+            )
+    else:
+        print("Prior actions: none")
+    print(f"Estimated opponents: {result.opponent_count}")
     print(f"Hand class:    {result.hand_class.name}")
     print(f"In open range: {'yes' if result.range_frequency.open_frequency > 0.0 else 'no'}")
     print(f"Open freq:     {result.range_frequency.open_frequency * 100:.0f}%")
@@ -131,8 +201,11 @@ def print_input_guide() -> None:
     print("Invalid examples: 10h, Kx, ZZ, duplicated cards like Ah Ah")
     print()
     print("Players before hero are treated as folded.")
-    print("Players behind hero are derived from position: BTN has SB and BB only.")
-    print("Pot size, call amount, and raise amount cannot be negative.")
+    print("In a new analysis, actions are entered in order: UTG, HJ, CO, BTN, SB, BB.")
+    print("Input stops when the sequence reaches hero's position.")
+    print("Players who call or raise before hero are counted as active opponents.")
+    print("Players behind hero are also counted as possible opponents: BTN has SB and BB behind.")
+    print("Pot size, action amounts, and raise amount cannot be negative.")
     print("Fold probability is estimated automatically from opponent EV versus hero open range.")
     print_opening_ranges()
 

@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from random import shuffle
+from random import sample
 
-from card import is_same_card
 from common import Card, HoleCards, Rank, Suit
 from poker_eval import compare_hand_values, evaluate_7cards
 
 DECK_SIZE = 52
 BOARD_SIZE = 5
 MAX_OPPONENTS = 5
+FULL_DECK = tuple(
+    Card(rank=Rank(rank), suit=Suit(suit))
+    for suit in range(int(Suit.CLUBS), int(Suit.SPADES) + 1)
+    for rank in range(int(Rank.TWO), int(Rank.ACE) + 1)
+)
 
 
 @dataclass(frozen=True)
@@ -31,23 +35,13 @@ class EquityResult:
     equity: float
 
 
-def _build_deck() -> list[Card]:
-    return [
-        Card(rank=Rank(rank), suit=Suit(suit))
-        for suit in range(int(Suit.CLUBS), int(Suit.SPADES) + 1)
-        for rank in range(int(Rank.TWO), int(Rank.ACE) + 1)
-    ]
+def _available_deck(hero_hand: HoleCards) -> tuple[Card, ...]:
+    known_cards = {hero_hand.card1, hero_hand.card2}
+    return tuple(card for card in FULL_DECK if card not in known_cards)
 
 
-def _remove_known_cards(deck: list[Card], hand: HoleCards) -> list[Card]:
-    return [
-        card for card in deck
-        if not is_same_card(card, hand.card1) and not is_same_card(card, hand.card2)
-    ]
-
-
-def _make_player_value(hand: HoleCards, board: list[Card]) -> object:
-    return evaluate_7cards([hand.card1, hand.card2, *board])
+def _make_player_value(card1: Card, card2: Card, board: tuple[Card, ...]) -> object:
+    return evaluate_7cards((card1, card2, *board))
 
 
 def estimate_preflop_equity(equity_input: EquityInput) -> EquityResult:
@@ -69,25 +63,22 @@ def estimate_preflop_equity(equity_input: EquityInput) -> EquityResult:
     wins = 0
     ties = 0
     losses = 0
+    hero_card1 = equity_input.hero_hand.card1
+    hero_card2 = equity_input.hero_hand.card2
+    available_deck = _available_deck(equity_input.hero_hand)
+    cards_needed = opponent_count * 2 + BOARD_SIZE
 
     for _ in range(simulations):
-        deck = _remove_known_cards(_build_deck(), equity_input.hero_hand)
-        shuffle(deck)
-
-        index = 0
-        opponents: list[HoleCards] = []
-        for _ in range(opponent_count):
-            opponents.append(HoleCards(deck[index], deck[index + 1]))
-            index += 2
-
-        board = deck[index:index + BOARD_SIZE]
-        hero_value = _make_player_value(equity_input.hero_hand, board)
+        dealt = sample(available_deck, cards_needed)
+        board = tuple(dealt[opponent_count * 2:opponent_count * 2 + BOARD_SIZE])
+        hero_value = _make_player_value(hero_card1, hero_card2, board)
 
         has_better_opponent = False
         has_equal_opponent = False
 
-        for opponent in opponents:
-            opponent_value = _make_player_value(opponent, board)
+        for opponent_index in range(opponent_count):
+            first = opponent_index * 2
+            opponent_value = _make_player_value(dealt[first], dealt[first + 1], board)
             comparison = compare_hand_values(hero_value, opponent_value)
 
             if comparison < 0:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from common import Action, HoleCards, Position
+from common import Action, HoleCards, PlayerAction, Position
 from equity import EquityInput, EquityResult, estimate_preflop_equity
 from range_model import (
     HandClass,
@@ -22,6 +22,7 @@ class SolverInput:
     call_amount: float
     raise_amount: float
     simulations: int
+    prior_actions: tuple[PlayerAction, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class SolverResult:
     ev_raise: float
     recommendation: Action
     explanation: str
+    prior_actions: tuple[PlayerAction, ...]
 
 
 def _clamp_probability(value: float) -> float:
@@ -45,7 +47,11 @@ def _clamp_probability(value: float) -> float:
 
 
 def solve_preflop_decision(solver_input: SolverInput) -> SolverResult:
-    opponent_count = players_behind_count(solver_input.hero_position)
+    active_before_hero = sum(
+        1 for record in solver_input.prior_actions
+        if record.action in (Action.CALL, Action.RAISE)
+    )
+    opponent_count = active_before_hero + players_behind_count(solver_input.hero_position)
     equity_result = estimate_preflop_equity(
         EquityInput(
             hero_hand=solver_input.hero_hand,
@@ -92,8 +98,9 @@ def solve_preflop_decision(solver_input: SolverInput) -> SolverResult:
 
     explanation = (
         f"Hand class {hand_class.name} has {range_frequency.open_frequency * 100:.0f}% "
-        f"opening frequency from this position. Future fold probability is estimated "
-        f"from opponents' EV versus this position's open range. Recommended "
+        f"opening frequency from this position. Prior active opponents and players "
+        f"behind hero are included in the equity estimate. Future fold probability "
+        f"is estimated from opponents' EV versus this position's open range. Recommended "
         f"{action_to_string(recommendation)} because it is the highest positive EV action."
     )
 
@@ -110,6 +117,7 @@ def solve_preflop_decision(solver_input: SolverInput) -> SolverResult:
         ev_raise=ev_raise,
         recommendation=recommendation,
         explanation=explanation,
+        prior_actions=solver_input.prior_actions,
     )
 
 

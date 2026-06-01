@@ -53,3 +53,10 @@ class Card:
 class HoleCards:
     card1: Card
     card2: Card
+
+
+@dataclass(frozen=True)
+class PlayerAction:
+    position: Position
+    action: Action
+    amount: float
