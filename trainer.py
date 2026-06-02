@@ -79,13 +79,12 @@ class PositionStats:
 def generate_random_scenario() -> TrainerScenario:
     """Generate a random preflop training spot."""
     hero_position = choice(HERO_POSITIONS)
-    hero_cards = sample(FULL_DECK, 2)
-    hero_hand = HoleCards(hero_cards[0], hero_cards[1])
     hero_contribution = _starting_contribution(hero_position)
     possible_scenario_types = [SCENARIO_OPEN_FIRST if hero_position == Position.UTG else SCENARIO_FACING_OPEN]
     if hero_position != Position.BB:
         possible_scenario_types.append(SCENARIO_FACING_3BET)
     scenario_type = choice(possible_scenario_types)
+    hero_hand = _generate_hero_hand_for_scenario(hero_position, scenario_type)
 
     if scenario_type == SCENARIO_OPEN_FIRST:
         return TrainerScenario(
@@ -348,6 +347,25 @@ def _three_bet_size(open_size: float, three_bettor_position: Position) -> float:
     if three_bettor_position in (Position.SB, Position.BB):
         return min(STACK_BB, round(open_size * choice((3.8, 4.0, 4.5)), 1))
     return min(STACK_BB, round(open_size * choice((3.0, 3.2, 3.5)), 1))
+
+
+def _generate_hero_hand_for_scenario(hero_position: Position, scenario_type: str) -> HoleCards:
+    if scenario_type != SCENARIO_FACING_3BET:
+        hero_cards = sample(FULL_DECK, 2)
+        return HoleCards(hero_cards[0], hero_cards[1])
+
+    candidates: list[tuple[HoleCards, float]] = []
+    for first_index, first in enumerate(FULL_DECK):
+        for second in FULL_DECK[first_index + 1:]:
+            hand = HoleCards(first, second)
+            hand_class = get_hand_class(hand)
+            frequency = get_preflop_frequency(hero_position, hand_class).open_frequency
+            if frequency > 0.0:
+                candidates.append((hand, frequency))
+
+    hands = [candidate[0] for candidate in candidates]
+    weights = [candidate[1] for candidate in candidates]
+    return choices(hands, weights=weights, k=1)[0]
 
 
 def _evaluate_option(
