@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from random import choice, sample
+from random import choices, choice, sample
 
 from card import card_to_string
 from common import Action, Card, HoleCards, PlayerAction, Position, Rank, Suit
-from equity import EquityInput, estimate_preflop_equity
-from range_model import position_to_string
+from poker_eval import compare_hand_values, evaluate_7cards
+from range_model import get_hand_class, get_preflop_frequency, position_to_string
 
 
 POSITIONS = (Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB)
 STACK_BB = 100.0
 DEFAULT_SIMULATIONS = 5000
+BOARD_SIZE = 5
 
 FULL_DECK = tuple(
     Card(rank=Rank(rank), suit=Suit(suit))
@@ -62,6 +63,12 @@ class TrainerAnswer:
         return self.selected_index == self.best_index
 
 
+@dataclass
+class PositionStats:
+    attempts: int = 0
+    correct: int = 0
+
+
 def generate_random_scenario() -> TrainerScenario:
     """Generate a simple heads-up preflop spot where Hero faces one open raise."""
     opener_position = choice((Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB))
@@ -109,15 +116,8 @@ def evaluate_trainer_answer(
     if selected_index < 0 or selected_index >= len(scenario.options):
         raise ValueError("selected_index is out of range")
 
-    equity = estimate_preflop_equity(
-        EquityInput(
-            hero_hand=scenario.hero_hand,
-            opponent_count=1,
-            simulations=simulations,
-        )
-    ).equity
     option_results = tuple(
-        _evaluate_option(scenario, option, equity)
+        _evaluate_option(scenario, option, simulations)
         for option in scenario.options
     )
     best_index = max(range(len(option_results)), key=lambda index: option_results[index].ev)
@@ -137,12 +137,13 @@ def format_scenario(scenario: TrainerScenario) -> str:
         "Preflop training scenario",
         "-------------------------",
         "6-max table, effective stack 100 BB",
-        f"{position_to_string(scenario.opener_position)} raises to {scenario.open_size:.1f} BB.",
     ]
 
     for record in scenario.table_actions:
         if record.action == Action.FOLD:
             lines.append(f"{position_to_string(record.position)} folds.")
+        elif record.action == Action.RAISE:
+            lines.append(f"{position_to_string(record.position)} raises to {scenario.open_size:.1f} BB.")
 
     lines.extend([
         f"Hero is {position_to_string(scenario.hero_position)} with {first} {second}.",
@@ -172,9 +173,10 @@ def format_answer(answer: TrainerAnswer) -> str:
 
     for index, result in enumerate(answer.option_results, start=1):
         marker = " <- best" if index - 1 == answer.best_index else ""
+        equity_text = "n/a" if result.option.action == Action.FOLD else f"{result.equity:.4f}"
         lines.append(
             f"{index}. {result.option.label}: EV {result.ev:+.4f} BB, "
-            f"equity {result.equity:.4f}, fold prob {result.fold_probability * 100:.2f}%"
+            f"equity {equity_text}, fold prob {result.fold_probability * 100:.2f}%"
             f"{marker}"
         )
 
@@ -201,6 +203,34 @@ def run_training_round(simulations: int = DEFAULT_SIMULATIONS) -> None:
     print(format_answer(answer))
 
 
+def run_training_session(simulations: int = DEFAULT_SIMULATIONS) -> None:
+    total_attempts = 0
+    total_correct = 0
+    position_stats = {position: PositionStats() for position in POSITIONS}
+
+    while True:
+        scenario = generate_random_scenario()
+        print()
+        print(format_scenario(scenario))
+        selected_index = _read_choice(len(scenario.options))
+        answer = evaluate_trainer_answer(scenario, selected_index, simulations)
+        print(format_answer(answer))
+
+        total_attempts += 1
+        if answer.is_correct:
+            total_correct += 1
+
+        stats = position_stats[scenario.opener_position]
+        stats.attempts += 1
+        if answer.is_correct:
+            stats.correct += 1
+
+        if not _read_yes_no("\nPractice another hand? (y/n): "):
+            break
+
+    print(_format_session_summary(total_attempts, total_correct, position_stats))
+
+
 def _make_options(call_amount: float, open_size: float) -> tuple[TrainerOption, ...]:
     return (
         TrainerOption("Fold", Action.FOLD, 0.0, 0.0, 1.0),
@@ -214,23 +244,25 @@ def _make_options(call_amount: float, open_size: float) -> tuple[TrainerOption, 
 def _evaluate_option(
     scenario: TrainerScenario,
     option: TrainerOption,
-    equity: float,
+    simulations: int,
 ) -> TrainerOptionResult:
+    fold_probability = 0.0
+
     if option.action == Action.FOLD:
         return TrainerOptionResult(
             option=option,
             ev=0.0,
-            equity=equity,
+            equity=0.0,
             fold_probability=0.0,
             opponent_count=1,
         )
 
     if option.action == Action.CALL:
+        equity = _estimate_equity_against_opener_range(scenario, simulations)
         final_pot = scenario.pot_size + option.call_amount
         ev = equity * final_pot - option.call_amount
-        fold_probability = 0.0
     else:
-        fold_probability = _estimate_3bet_fold_probability(scenario, option)
+        equity, fold_probability = _estimate_equity_when_3bet_called(scenario, option, simulations)
         opponent_call_amount = option.total_bet - scenario.open_size
         final_pot = scenario.pot_size + option.raise_amount + opponent_call_amount
         ev = (
@@ -247,26 +279,215 @@ def _evaluate_option(
     )
 
 
-def _estimate_3bet_fold_probability(scenario: TrainerScenario, option: TrainerOption) -> float:
-    if option.total_bet <= scenario.open_size:
-        return 0.0
+def _read_choice(option_count: int) -> int:
+    while True:
+        text = input(f"Your choice (1-{option_count}): ").strip()
+        try:
+            selected_index = int(text) - 1
+        except ValueError:
+            selected_index = -1
 
-    size_ratio = option.total_bet / scenario.open_size
-    base_by_position = {
-        Position.UTG: 0.34,
-        Position.HJ: 0.39,
-        Position.CO: 0.45,
-        Position.BTN: 0.50,
-        Position.SB: 0.47,
-    }
-    base = base_by_position.get(scenario.opener_position, 0.42)
-    size_bonus = min(0.30, max(0.0, (size_ratio - 3.0) * 0.08))
+        if 0 <= selected_index < option_count:
+            return selected_index
 
-    if option.total_bet >= STACK_BB:
-        return 0.68
+        print(f"Invalid choice. Please enter 1 to {option_count}.")
 
-    return max(0.05, min(0.80, base + size_bonus))
+
+def _read_yes_no(prompt: str) -> bool:
+    while True:
+        text = input(prompt).strip().lower()
+        if text in ("y", "yes"):
+            return True
+        if text in ("n", "no"):
+            return False
+        print("Invalid input. Please enter y or n.")
+
+
+def _format_session_summary(
+    total_attempts: int,
+    total_correct: int,
+    position_stats: dict[Position, PositionStats],
+) -> str:
+    accuracy = (total_correct / total_attempts * 100.0) if total_attempts else 0.0
+    lines = [
+        "",
+        "Session summary",
+        "---------------",
+        f"Total accuracy: {total_correct}/{total_attempts} ({accuracy:.2f}%)",
+        "",
+        "Accuracy by opener position:",
+    ]
+
+    for position in POSITIONS:
+        stats = position_stats[position]
+        if stats.attempts == 0:
+            lines.append(f"{position_to_string(position)}: no hands practiced")
+            continue
+
+        position_accuracy = stats.correct / stats.attempts * 100.0
+        lines.append(
+            f"{position_to_string(position)}: "
+            f"{stats.correct}/{stats.attempts} ({position_accuracy:.2f}%)"
+        )
+
+    return "\n".join(lines)
+
+
+def _estimate_equity_against_opener_range(scenario: TrainerScenario, simulations: int) -> float:
+    candidates = _opener_range_candidates(scenario, minimum_score=None)
+    return _estimate_equity_against_candidates(scenario.hero_hand, candidates, simulations)
+
+
+def _estimate_equity_when_3bet_called(
+    scenario: TrainerScenario,
+    option: TrainerOption,
+    simulations: int,
+) -> tuple[float, float]:
+    all_candidates = _opener_range_candidates(scenario, minimum_score=None)
+    if not all_candidates:
+        return 1.0, 1.0
+
+    continue_fraction = _continue_fraction(scenario.opener_position, option.total_bet)
+    continuing_candidates = _top_weighted_candidates(all_candidates, continue_fraction)
+    total_weight = sum(candidate[1] for candidate in all_candidates)
+    continue_weight = sum(candidate[1] for candidate in continuing_candidates)
+    fold_probability = 1.0 - (continue_weight / total_weight if total_weight > 0.0 else 0.0)
+    equity = _estimate_equity_against_candidates(scenario.hero_hand, continuing_candidates, simulations)
+    return equity, max(0.0, min(0.98, fold_probability))
+
+
+def _opener_range_candidates(
+    scenario: TrainerScenario,
+    minimum_score: float | None,
+) -> list[tuple[HoleCards, float, float]]:
+    candidates: list[tuple[HoleCards, float, float]] = []
+    hero_cards = {scenario.hero_hand.card1, scenario.hero_hand.card2}
+
+    for first_index, first in enumerate(FULL_DECK):
+        if first in hero_cards:
+            continue
+
+        for second in FULL_DECK[first_index + 1:]:
+            if second in hero_cards:
+                continue
+
+            opponent_hand = HoleCards(first, second)
+            hand_class = get_hand_class(opponent_hand)
+            frequency = get_preflop_frequency(scenario.opener_position, hand_class).open_frequency
+            if frequency <= 0.0:
+                continue
+
+            score = _hand_strength_proxy(hand_class)
+            if minimum_score is not None and score < minimum_score:
+                continue
+
+            candidates.append((opponent_hand, frequency, score))
+
+    return candidates
+
+
+def _top_weighted_candidates(
+    candidates: list[tuple[HoleCards, float, float]],
+    continue_fraction: float,
+) -> list[tuple[HoleCards, float, float]]:
+    target_weight = sum(candidate[1] for candidate in candidates) * continue_fraction
+    selected: list[tuple[HoleCards, float, float]] = []
+    running_weight = 0.0
+
+    for candidate in sorted(candidates, key=lambda item: item[2], reverse=True):
+        selected.append(candidate)
+        running_weight += candidate[1]
+        if running_weight >= target_weight:
+            break
+
+    return selected or candidates[:1]
+
+
+def _estimate_equity_against_candidates(
+    hero_hand: HoleCards,
+    candidates: list[tuple[HoleCards, float, float]],
+    simulations: int,
+) -> float:
+    if not candidates:
+        return 1.0
+
+    hands = [candidate[0] for candidate in candidates]
+    weights = [candidate[1] for candidate in candidates]
+    wins = 0
+    ties = 0
+    hero_known_cards = {hero_hand.card1, hero_hand.card2}
+    simulation_count = max(1, simulations)
+
+    for _ in range(simulation_count):
+        opponent_hand = choices(hands, weights=weights, k=1)[0]
+        known_cards = {
+            hero_hand.card1,
+            hero_hand.card2,
+            opponent_hand.card1,
+            opponent_hand.card2,
+        }
+        deck = [card for card in FULL_DECK if card not in known_cards and card not in hero_known_cards]
+        board = tuple(sample(deck, BOARD_SIZE))
+        hero_value = evaluate_7cards((hero_hand.card1, hero_hand.card2, *board))
+        opponent_value = evaluate_7cards((opponent_hand.card1, opponent_hand.card2, *board))
+        comparison = compare_hand_values(hero_value, opponent_value)
+
+        if comparison > 0:
+            wins += 1
+        elif comparison == 0:
+            ties += 1
+
+    return (wins + 0.5 * ties) / simulation_count
+
+
+def _hand_strength_proxy(hand_class) -> float:
+    if hand_class.pair:
+        return 60.0 + hand_class.high_rank * 4.0
+
+    score = hand_class.high_rank * 4.0 + hand_class.low_rank * 2.5
+    gap = hand_class.high_rank - hand_class.low_rank - 1
+
+    if hand_class.suited:
+        score += 5.0
+    if gap == 0:
+        score += 4.0
+    elif gap == 1:
+        score += 2.0
+    elif gap >= 3:
+        score -= gap * 2.0
+    if hand_class.high_rank == int(Rank.ACE):
+        score += 4.0
+
+    return score
+
+
+def _continue_fraction(opener_position: Position, total_bet: float) -> float:
+    if total_bet >= STACK_BB:
+        return {
+            Position.UTG: 0.05,
+            Position.HJ: 0.06,
+            Position.CO: 0.08,
+            Position.BTN: 0.10,
+            Position.SB: 0.09,
+        }.get(opener_position, 0.07)
+
+    if total_bet >= 15.0:
+        return {
+            Position.UTG: 0.20,
+            Position.HJ: 0.24,
+            Position.CO: 0.30,
+            Position.BTN: 0.36,
+            Position.SB: 0.32,
+        }.get(opener_position, 0.28)
+
+    return {
+        Position.UTG: 0.42,
+        Position.HJ: 0.46,
+        Position.CO: 0.52,
+        Position.BTN: 0.58,
+        Position.SB: 0.54,
+    }.get(opener_position, 0.50)
 
 
 if __name__ == "__main__":
-    run_training_round()
+    run_training_session()
