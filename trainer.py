@@ -10,7 +10,7 @@ from range_model import get_hand_class, get_preflop_frequency, position_to_strin
 
 
 POSITIONS = (Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB)
-HERO_POSITIONS = (Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB)
+HERO_POSITIONS = (Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB)
 STACK_BB = 100.0
 DEFAULT_SIMULATIONS = 5000
 BOARD_SIZE = 5
@@ -71,16 +71,29 @@ class PositionStats:
 
 
 def generate_random_scenario() -> TrainerScenario:
-    """Generate a simple heads-up preflop spot where Hero faces one open raise."""
+    """Generate a random preflop training spot."""
     hero_position = choice(HERO_POSITIONS)
-    opener_position = choice(tuple(position for position in POSITIONS if position < hero_position))
-    open_size = 3.5 if opener_position == Position.SB and hero_position == Position.BB else choice((2.0, 2.5, 3.0))
     hero_cards = sample(FULL_DECK, 2)
     hero_hand = HoleCards(hero_cards[0], hero_cards[1])
+    hero_contribution = _starting_contribution(hero_position)
+
+    if hero_position == Position.UTG:
+        return TrainerScenario(
+            hero_position=hero_position,
+            hero_hand=hero_hand,
+            opener_position=Position.INVALID,
+            open_size=0.0,
+            pot_size=1.5,
+            call_amount=0.0,
+            table_actions=(),
+            options=_make_open_first_options(hero_contribution),
+        )
+
+    opener_position = choice(tuple(position for position in POSITIONS if position < hero_position))
+    open_size = 3.5 if opener_position == Position.SB and hero_position == Position.BB else choice((2.0, 2.5, 3.0))
 
     table_actions: list[PlayerAction] = []
     pot_size = 1.5
-    hero_contribution = _starting_contribution(hero_position)
 
     for position in POSITIONS:
         if position == hero_position:
@@ -150,6 +163,9 @@ def format_scenario(scenario: TrainerScenario) -> str:
             lines.append(f"{position_to_string(record.position)} folds.")
         elif record.action == Action.RAISE:
             lines.append(f"{position_to_string(record.position)} raises to {scenario.open_size:.1f} BB.")
+
+    if _is_open_first_scenario(scenario):
+        lines.append("Hero is first to act.")
 
     lines.extend([
         f"Hero is {position_to_string(scenario.hero_position)} with {first} {second}.",
@@ -247,11 +263,24 @@ def _make_options(call_amount: float, open_size: float, hero_contribution: float
     )
 
 
+def _make_open_first_options(hero_contribution: float) -> tuple[TrainerOption, ...]:
+    return (
+        TrainerOption("Fold", Action.FOLD, 0.0, 0.0, hero_contribution),
+        TrainerOption("Raise to 2 BB", Action.RAISE, 0.0, 2.0 - hero_contribution, 2.0),
+        TrainerOption("Raise to 2.5 BB", Action.RAISE, 0.0, 2.5 - hero_contribution, 2.5),
+        TrainerOption("Raise to 3 BB", Action.RAISE, 0.0, 3.0 - hero_contribution, 3.0),
+        TrainerOption("All-in 100 BB", Action.RAISE, 0.0, STACK_BB - hero_contribution, STACK_BB),
+    )
+
+
 def _evaluate_option(
     scenario: TrainerScenario,
     option: TrainerOption,
     simulations: int,
 ) -> TrainerOptionResult:
+    if _is_open_first_scenario(scenario):
+        return _evaluate_open_first_option(scenario, option, simulations)
+
     fold_probability = 0.0
 
     if option.action == Action.FOLD:
@@ -349,6 +378,50 @@ def _starting_contribution(position: Position) -> float:
     return 0.0
 
 
+def _is_open_first_scenario(scenario: TrainerScenario) -> bool:
+    return scenario.opener_position == Position.INVALID
+
+
+def _evaluate_open_first_option(
+    scenario: TrainerScenario,
+    option: TrainerOption,
+    simulations: int,
+) -> TrainerOptionResult:
+    if option.action == Action.FOLD:
+        return TrainerOptionResult(
+            option=option,
+            ev=0.0,
+            equity=0.0,
+            fold_probability=0.0,
+            opponent_count=5,
+        )
+
+    hand_class = get_hand_class(scenario.hero_hand)
+    open_frequency = get_preflop_frequency(scenario.hero_position, hand_class).open_frequency
+    fold_probability = _estimate_open_first_fold_probability(scenario, option, open_frequency)
+    candidates = _open_first_continue_candidates(scenario, option)
+    equity = _estimate_equity_against_candidates(scenario.hero_hand, candidates, simulations)
+    realization = _equity_realization(scenario, option)
+    caller_contribution = option.total_bet
+    final_pot = scenario.pot_size + option.raise_amount + caller_contribution
+    chip_ev = (
+        fold_probability * scenario.pot_size
+        + (1.0 - fold_probability) * (equity * realization * final_pot - option.raise_amount)
+    )
+    range_penalty = (1.0 - open_frequency) * option.raise_amount * 0.45
+    if option.total_bet >= STACK_BB:
+        range_penalty += option.raise_amount * 0.08
+    ev = chip_ev - range_penalty
+
+    return TrainerOptionResult(
+        option=option,
+        ev=ev,
+        equity=equity,
+        fold_probability=fold_probability,
+        opponent_count=5,
+    )
+
+
 def _estimate_equity_against_opener_range(scenario: TrainerScenario, simulations: int) -> float:
     candidates = _opener_range_candidates(scenario, minimum_score=None)
     return _estimate_equity_against_candidates(scenario.hero_hand, candidates, simulations)
@@ -368,8 +441,97 @@ def _estimate_equity_when_3bet_called(
     total_weight = sum(candidate[1] for candidate in all_candidates)
     continue_weight = sum(candidate[1] for candidate in continuing_candidates)
     fold_probability = 1.0 - (continue_weight / total_weight if total_weight > 0.0 else 0.0)
+    fold_probability = _adjust_3bet_fold_probability(scenario, option, fold_probability)
     equity = _estimate_equity_against_candidates(scenario.hero_hand, continuing_candidates, simulations)
     return equity, max(0.0, min(0.98, fold_probability))
+
+
+def _estimate_open_first_fold_probability(
+    scenario: TrainerScenario,
+    option: TrainerOption,
+    open_frequency: float,
+) -> float:
+    hand_class = get_hand_class(scenario.hero_hand)
+
+    if option.total_bet >= STACK_BB:
+        base = 0.88
+    else:
+        base = {
+            2.0: 0.42,
+            2.5: 0.38,
+            3.0: 0.35,
+        }.get(option.total_bet, 0.36)
+
+    if open_frequency <= 0.0:
+        base -= 0.10
+    elif open_frequency >= 0.75:
+        base += 0.03
+
+    if hand_class.high_rank == int(Rank.ACE):
+        base += 0.03
+    elif hand_class.high_rank == int(Rank.KING):
+        base += 0.02
+
+    return max(0.05, min(0.95, base))
+
+
+def _open_first_continue_candidates(
+    scenario: TrainerScenario,
+    option: TrainerOption,
+) -> list[tuple[HoleCards, float, float]]:
+    all_candidates: list[tuple[HoleCards, float, float]] = []
+    hero_cards = {scenario.hero_hand.card1, scenario.hero_hand.card2}
+
+    for defender_position in POSITIONS:
+        if defender_position <= scenario.hero_position:
+            continue
+
+        defender_candidates: list[tuple[HoleCards, float, float]] = []
+        for first_index, first in enumerate(FULL_DECK):
+            if first in hero_cards:
+                continue
+
+            for second in FULL_DECK[first_index + 1:]:
+                if second in hero_cards:
+                    continue
+
+                hand = HoleCards(first, second)
+                hand_class = get_hand_class(hand)
+                frequency = get_preflop_frequency(defender_position, hand_class).open_frequency
+                if frequency <= 0.0:
+                    continue
+
+                defender_candidates.append((hand, frequency, _hand_strength_proxy(hand_class)))
+
+        continue_fraction = _open_first_continue_fraction(defender_position, option.total_bet)
+        all_candidates.extend(_top_weighted_candidates(defender_candidates, continue_fraction))
+
+    return all_candidates
+
+
+def _open_first_continue_fraction(defender_position: Position, total_bet: float) -> float:
+    if total_bet >= STACK_BB:
+        return {
+            Position.HJ: 0.05,
+            Position.CO: 0.06,
+            Position.BTN: 0.08,
+            Position.SB: 0.07,
+            Position.BB: 0.08,
+        }.get(defender_position, 0.07)
+
+    base = {
+        Position.HJ: 0.20,
+        Position.CO: 0.24,
+        Position.BTN: 0.32,
+        Position.SB: 0.28,
+        Position.BB: 0.36,
+    }.get(defender_position, 0.25)
+    if total_bet <= 2.0:
+        base += 0.06
+    elif total_bet >= 3.0:
+        base -= 0.04
+
+    return max(0.05, min(0.70, base))
 
 
 def _opener_range_candidates(
@@ -528,6 +690,30 @@ def _equity_realization(scenario: TrainerScenario, option: TrainerOption) -> flo
         realization += 0.04
 
     return max(0.42, min(0.92, realization))
+
+
+def _adjust_3bet_fold_probability(
+    scenario: TrainerScenario,
+    option: TrainerOption,
+    fold_probability: float,
+) -> float:
+    hand_class = get_hand_class(scenario.hero_hand)
+    adjustment = 0.0
+
+    if hand_class.high_rank == int(Rank.ACE):
+        adjustment += 0.05
+    elif hand_class.high_rank == int(Rank.KING):
+        adjustment += 0.03
+    elif scenario.opener_position in (Position.UTG, Position.HJ):
+        adjustment -= 0.12
+
+    if option.total_bet >= 15.0 and hand_class.high_rank < int(Rank.QUEEN):
+        adjustment -= 0.08
+
+    if hand_class.pair and hand_class.high_rank >= int(Rank.TEN):
+        adjustment += 0.03
+
+    return max(0.0, min(0.98, fold_probability + adjustment))
 
 
 def _continue_fraction(opener_position: Position, total_bet: float) -> float:
