@@ -10,6 +10,7 @@ from range_model import get_hand_class, get_preflop_frequency, position_to_strin
 
 
 POSITIONS = (Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB)
+HERO_POSITIONS = (Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB)
 STACK_BB = 100.0
 DEFAULT_SIMULATIONS = 5000
 BOARD_SIZE = 5
@@ -71,14 +72,15 @@ class PositionStats:
 
 def generate_random_scenario() -> TrainerScenario:
     """Generate a simple heads-up preflop spot where Hero faces one open raise."""
-    opener_position = choice((Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB))
-    hero_position = Position.BB
-    open_size = choice((2.0, 2.5, 3.0))
+    hero_position = choice(HERO_POSITIONS)
+    opener_position = choice(tuple(position for position in POSITIONS if position < hero_position))
+    open_size = 3.5 if opener_position == Position.SB and hero_position == Position.BB else choice((2.0, 2.5, 3.0))
     hero_cards = sample(FULL_DECK, 2)
     hero_hand = HoleCards(hero_cards[0], hero_cards[1])
 
     table_actions: list[PlayerAction] = []
     pot_size = 1.5
+    hero_contribution = _starting_contribution(hero_position)
 
     for position in POSITIONS:
         if position == hero_position:
@@ -93,8 +95,12 @@ def generate_random_scenario() -> TrainerScenario:
         else:
             table_actions.append(PlayerAction(position, Action.FOLD, 0.0))
 
-    call_amount = open_size - 1.0
-    options = _make_options(call_amount=call_amount, open_size=open_size)
+    call_amount = open_size - hero_contribution
+    options = _make_options(
+        call_amount=call_amount,
+        open_size=open_size,
+        hero_contribution=hero_contribution,
+    )
 
     return TrainerScenario(
         hero_position=hero_position,
@@ -206,7 +212,7 @@ def run_training_round(simulations: int = DEFAULT_SIMULATIONS) -> None:
 def run_training_session(simulations: int = DEFAULT_SIMULATIONS) -> None:
     total_attempts = 0
     total_correct = 0
-    position_stats = {position: PositionStats() for position in POSITIONS}
+    position_stats = {position: PositionStats() for position in HERO_POSITIONS}
 
     while True:
         scenario = generate_random_scenario()
@@ -220,7 +226,7 @@ def run_training_session(simulations: int = DEFAULT_SIMULATIONS) -> None:
         if answer.is_correct:
             total_correct += 1
 
-        stats = position_stats[scenario.opener_position]
+        stats = position_stats[scenario.hero_position]
         stats.attempts += 1
         if answer.is_correct:
             stats.correct += 1
@@ -231,13 +237,13 @@ def run_training_session(simulations: int = DEFAULT_SIMULATIONS) -> None:
     print(_format_session_summary(total_attempts, total_correct, position_stats))
 
 
-def _make_options(call_amount: float, open_size: float) -> tuple[TrainerOption, ...]:
+def _make_options(call_amount: float, open_size: float, hero_contribution: float) -> tuple[TrainerOption, ...]:
     return (
-        TrainerOption("Fold", Action.FOLD, 0.0, 0.0, 1.0),
+        TrainerOption("Fold", Action.FOLD, 0.0, 0.0, hero_contribution),
         TrainerOption("Call", Action.CALL, call_amount, 0.0, open_size),
-        TrainerOption("Raise to 6 BB", Action.RAISE, 0.0, 5.0, 6.0),
-        TrainerOption("Raise to 15 BB", Action.RAISE, 0.0, 14.0, 15.0),
-        TrainerOption("All-in 100 BB", Action.RAISE, 0.0, 99.0, STACK_BB),
+        TrainerOption("Raise to 6 BB", Action.RAISE, 0.0, 6.0 - hero_contribution, 6.0),
+        TrainerOption("Raise to 15 BB", Action.RAISE, 0.0, 15.0 - hero_contribution, 15.0),
+        TrainerOption("All-in 100 BB", Action.RAISE, 0.0, STACK_BB - hero_contribution, STACK_BB),
     )
 
 
@@ -259,15 +265,17 @@ def _evaluate_option(
 
     if option.action == Action.CALL:
         equity = _estimate_equity_against_opener_range(scenario, simulations)
+        realization = _equity_realization(scenario, option)
         final_pot = scenario.pot_size + option.call_amount
-        ev = equity * final_pot - option.call_amount
+        ev = equity * realization * final_pot - option.call_amount
     else:
         equity, fold_probability = _estimate_equity_when_3bet_called(scenario, option, simulations)
+        realization = _equity_realization(scenario, option)
         opponent_call_amount = option.total_bet - scenario.open_size
         final_pot = scenario.pot_size + option.raise_amount + opponent_call_amount
         ev = (
             fold_probability * scenario.pot_size
-            + (1.0 - fold_probability) * (equity * final_pot - option.raise_amount)
+            + (1.0 - fold_probability) * (equity * realization * final_pot - option.raise_amount)
         )
 
     return TrainerOptionResult(
@@ -315,10 +323,10 @@ def _format_session_summary(
         "---------------",
         f"Total accuracy: {total_correct}/{total_attempts} ({accuracy:.2f}%)",
         "",
-        "Accuracy by opener position:",
+        "Accuracy by hero position:",
     ]
 
-    for position in POSITIONS:
+    for position in HERO_POSITIONS:
         stats = position_stats[position]
         if stats.attempts == 0:
             lines.append(f"{position_to_string(position)}: no hands practiced")
@@ -331,6 +339,14 @@ def _format_session_summary(
         )
 
     return "\n".join(lines)
+
+
+def _starting_contribution(position: Position) -> float:
+    if position == Position.SB:
+        return 0.5
+    if position == Position.BB:
+        return 1.0
+    return 0.0
 
 
 def _estimate_equity_against_opener_range(scenario: TrainerScenario, simulations: int) -> float:
@@ -461,32 +477,85 @@ def _hand_strength_proxy(hand_class) -> float:
     return score
 
 
+def _equity_realization(scenario: TrainerScenario, option: TrainerOption) -> float:
+    if option.total_bet >= STACK_BB:
+        return 1.0
+
+    hand_class = get_hand_class(scenario.hero_hand)
+    realization = 0.50
+    gap = hand_class.high_rank - hand_class.low_rank - 1
+
+    if hand_class.pair:
+        realization += 0.18
+    if hand_class.suited:
+        realization += 0.15
+    if hand_class.high_rank == int(Rank.ACE):
+        realization += 0.12
+    elif hand_class.high_rank == int(Rank.KING):
+        realization += 0.08
+    elif hand_class.high_rank >= int(Rank.QUEEN):
+        realization += 0.08
+    elif hand_class.high_rank >= int(Rank.TEN):
+        realization += 0.05
+    if hand_class.low_rank >= int(Rank.EIGHT):
+        realization += 0.04
+
+    if gap <= 1 and not hand_class.pair:
+        realization += 0.06
+    elif gap >= 4:
+        realization -= 0.06
+
+    opener_bonus = {
+        Position.UTG: 0.00,
+        Position.HJ: 0.02,
+        Position.CO: 0.04,
+        Position.BTN: 0.06,
+        Position.SB: 0.08,
+    }.get(scenario.opener_position, 0.0)
+
+    hero_position_bonus = {
+        Position.HJ: 0.01,
+        Position.CO: 0.04,
+        Position.BTN: 0.08,
+        Position.SB: -0.08,
+    }.get(scenario.hero_position, 0.0)
+    if scenario.hero_position == Position.BB:
+        hero_position_bonus = 0.06 if scenario.opener_position == Position.SB else -0.02
+
+    realization += opener_bonus + hero_position_bonus
+
+    if option.action == Action.RAISE:
+        realization += 0.04
+
+    return max(0.42, min(0.92, realization))
+
+
 def _continue_fraction(opener_position: Position, total_bet: float) -> float:
     if total_bet >= STACK_BB:
         return {
-            Position.UTG: 0.05,
-            Position.HJ: 0.06,
-            Position.CO: 0.08,
-            Position.BTN: 0.10,
-            Position.SB: 0.09,
-        }.get(opener_position, 0.07)
+            Position.UTG: 0.08,
+            Position.HJ: 0.10,
+            Position.CO: 0.12,
+            Position.BTN: 0.15,
+            Position.SB: 0.14,
+        }.get(opener_position, 0.11)
 
     if total_bet >= 15.0:
         return {
-            Position.UTG: 0.20,
-            Position.HJ: 0.24,
-            Position.CO: 0.30,
-            Position.BTN: 0.36,
-            Position.SB: 0.32,
-        }.get(opener_position, 0.28)
+            Position.UTG: 0.36,
+            Position.HJ: 0.40,
+            Position.CO: 0.46,
+            Position.BTN: 0.52,
+            Position.SB: 0.48,
+        }.get(opener_position, 0.44)
 
     return {
-        Position.UTG: 0.42,
-        Position.HJ: 0.46,
-        Position.CO: 0.52,
-        Position.BTN: 0.58,
-        Position.SB: 0.54,
-    }.get(opener_position, 0.50)
+        Position.UTG: 0.90,
+        Position.HJ: 0.87,
+        Position.CO: 0.84,
+        Position.BTN: 0.80,
+        Position.SB: 0.82,
+    }.get(opener_position, 0.84)
 
 
 if __name__ == "__main__":
