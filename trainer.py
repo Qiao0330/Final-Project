@@ -383,6 +383,7 @@ def _generate_facing_4bet_scenario(
 ) -> TrainerScenario:
     possible_openers = tuple(position for position in POSITIONS if position < hero_position)
     opener_position = choice(possible_openers)
+    hero_hand = _generate_hero_hand_for_facing_4bet(hero_position, opener_position)
     open_size = choice((2.0, 2.5, 3.0))
     three_bet_size = _three_bet_size(open_size, hero_position)
     four_bet_size = min(STACK_BB, round(three_bet_size * choice((2.2, 2.4, 2.6)), 1))
@@ -440,6 +441,52 @@ def _generate_hero_hand_for_scenario(hero_position: Position, scenario_type: str
     hands = [candidate[0] for candidate in candidates]
     weights = [candidate[1] for candidate in candidates]
     return choices(hands, weights=weights, k=1)[0]
+
+
+def _generate_hero_hand_for_facing_4bet(hero_position: Position, opener_position: Position) -> HoleCards:
+    candidates: list[tuple[HoleCards, float]] = []
+
+    for first_index, first in enumerate(FULL_DECK):
+        for second in FULL_DECK[first_index + 1:]:
+            hand = HoleCards(first, second)
+            hand_class = get_hand_class(hand)
+            frequency = get_preflop_frequency(hero_position, hand_class).open_frequency
+            weight = _three_bet_candidate_weight(hand_class, opener_position, frequency)
+            if weight > 0.0:
+                candidates.append((hand, weight))
+
+    hands = [candidate[0] for candidate in candidates]
+    weights = [candidate[1] for candidate in candidates]
+    return choices(hands, weights=weights, k=1)[0]
+
+
+def _three_bet_candidate_weight(hand_class, opener_position: Position, open_frequency: float) -> float:
+    if open_frequency <= 0.0:
+        return 0.0
+
+    if hand_class.pair:
+        if hand_class.high_rank >= int(Rank.QUEEN):
+            return open_frequency * 4.0
+        if hand_class.high_rank >= int(Rank.TEN):
+            return open_frequency * 1.2
+        return 0.0
+
+    if hand_class.high_rank == int(Rank.ACE) and hand_class.low_rank >= int(Rank.KING):
+        return open_frequency * 4.0
+
+    if not hand_class.suited:
+        if hand_class.high_rank == int(Rank.ACE) and hand_class.low_rank >= int(Rank.QUEEN):
+            return open_frequency * 1.2
+        return 0.0
+
+    if hand_class.high_rank == int(Rank.ACE) and hand_class.low_rank >= int(Rank.FIVE):
+        return open_frequency * 2.0
+    if hand_class.high_rank == int(Rank.KING) and hand_class.low_rank >= int(Rank.TEN):
+        return open_frequency * 1.5
+    if opener_position >= Position.CO and hand_class.high_rank >= int(Rank.NINE):
+        return open_frequency * 0.8
+
+    return 0.0
 
 
 def _evaluate_option(
@@ -856,9 +903,12 @@ def _estimate_five_bet_fold_probability(
     if hand_class.high_rank == int(Rank.ACE):
         base += 0.05
     elif hand_class.high_rank == int(Rank.KING):
-        base += 0.03
+        base += 0.03 if hand_class.suited or hand_class.low_rank >= int(Rank.QUEEN) else -0.06
     elif hand_class.high_rank < int(Rank.QUEEN):
         base -= 0.10
+
+    if not hand_class.suited and not hand_class.pair and hand_class.low_rank < int(Rank.QUEEN):
+        base -= 0.12
 
     if hand_class.pair and hand_class.high_rank >= int(Rank.QUEEN):
         base += 0.03
@@ -875,6 +925,8 @@ def _five_bet_strategy_penalty(scenario: TrainerScenario, option: TrainerOption)
         penalty += option.raise_amount * 0.04
     if hand_class.high_rank < int(Rank.KING) and not (hand_class.pair and hand_class.high_rank >= int(Rank.JACK)):
         penalty += option.raise_amount * 0.05
+    if not hand_class.suited and not hand_class.pair and hand_class.low_rank < int(Rank.QUEEN):
+        penalty += option.raise_amount * 0.12
 
     return penalty
 
