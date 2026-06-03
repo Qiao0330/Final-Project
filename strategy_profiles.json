@@ -1,0 +1,64 @@
+{
+  "default": {
+    "unacted": 1.0,
+    "check": 1.0,
+    "call": 0.7,
+    "raise": 0.55,
+    "large_raise": 0.28,
+    "all_in": 0.1
+  },
+  "positions": {
+    "UTG": {
+      "unacted": 1.0,
+      "check": 1.0,
+      "call": 0.62,
+      "raise": 0.48,
+      "large_raise": 0.22,
+      "all_in": 0.06
+    },
+    "HJ": {
+      "unacted": 1.0,
+      "check": 1.0,
+      "call": 0.66,
+      "raise": 0.52,
+      "large_raise": 0.25,
+      "all_in": 0.07
+    },
+    "CO": {
+      "unacted": 1.0,
+      "check": 1.0,
+      "call": 0.72,
+      "raise": 0.58,
+      "large_raise": 0.3,
+      "all_in": 0.09
+    },
+    "BTN": {
+      "unacted": 1.0,
+      "check": 1.0,
+      "call": 0.78,
+      "raise": 0.66,
+      "large_raise": 0.36,
+      "all_in": 0.11
+    },
+    "SB": {
+      "unacted": 1.0,
+      "check": 1.0,
+      "call": 0.7,
+      "raise": 0.6,
+      "large_raise": 0.32,
+      "all_in": 0.1
+    },
+    "BB": {
+      "unacted": 1.0,
+      "check": 1.0,
+      "call": 0.85,
+      "raise": 0.5,
+      "large_raise": 0.28,
+      "all_in": 0.08
+    }
+  },
+  "raise_size_thresholds": {
+    "large_raise_total_bb": 12.0,
+    "all_in_total_bb": 99.0
+  }
+}

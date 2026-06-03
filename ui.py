@@ -80,6 +80,53 @@ def _read_position() -> Position:
     return Position(choice - 1)
 
 
+def _read_any_position(prompt: str) -> Position:
+    print("1. UTG  2. HJ  3. CO  4. BTN  5. SB  6. BB")
+    choice = _read_int_range(prompt, 1, 6)
+    return Position(choice - 1)
+
+
+def _read_action_record(position: Position) -> PlayerAction:
+    print(f"\nAction for {position_to_string(position)}")
+    print("1. Fold")
+    print("2. Call")
+    print("3. Raise")
+    print("4. Check")
+    choice = _read_int_range("Choose action: ", 1, 4)
+    action = {
+        1: Action.FOLD,
+        2: Action.CALL,
+        3: Action.RAISE,
+        4: Action.CHECK,
+    }[choice]
+    amount = 0.0
+    if action in (Action.CALL, Action.RAISE):
+        amount = _read_float_min("Amount added in BB: ", 0.0)
+    return PlayerAction(position=position, action=action, amount=amount)
+
+
+def _read_action_history() -> tuple[PlayerAction, ...]:
+    count = _read_int_range("Number of prior action records (0-30): ", 0, 30)
+    records: list[PlayerAction] = []
+    for index in range(count):
+        print(f"\nPrior action {index + 1}")
+        position = _read_any_position("Choose acting position: ")
+        records.append(_read_action_record(position))
+    return tuple(records)
+
+
+def _read_candidate_raise_amounts() -> tuple[float, ...]:
+    print("\nCandidate raise sizes")
+    print("Enter the amount Hero would invest for each raise option.")
+    print("Use 0 to skip raise analysis for this spot.")
+    count = _read_int_range("Number of raise sizes to compare (0-5): ", 0, 5)
+    values: list[float] = []
+    for index in range(count):
+        amount = _read_float_min(f"Raise option {index + 1} amount in BB: ", 0.01)
+        values.append(amount)
+    return tuple(values)
+
+
 def _read_player_action(position: Position, to_call: float) -> Action:
     print(f"\n{position_to_string(position)} action")
     if to_call > 0.0:
@@ -280,19 +327,26 @@ def read_solver_input() -> SolverInput:
     print("---------------------")
 
     hero_position = _read_position()
-    decision_context, table_actions = _read_complete_preflop_actions(hero_position)
     hero_hand = _read_hole_cards()
+    print("\nCurrent decision point")
+    pot_size = _read_float_min("Current pot size in BB: ", 0.0)
+    call_amount = _read_float_min("Amount Hero must call in BB (0 if check is available): ", 0.0)
+    candidate_raise_amounts = _read_candidate_raise_amounts()
+    active_opponent_count = _read_int_range("Active opponent count (0-5): ", 0, 5)
+    table_actions = _read_action_history()
     simulations = _read_int_range("Simulation count (1-1000000): ", 1, 1_000_000)
+    primary_raise_amount = candidate_raise_amounts[0] if candidate_raise_amounts else 0.0
 
     return SolverInput(
         hero_position=hero_position,
         hero_hand=hero_hand,
-        pot_size=decision_context.pot_size,
-        call_amount=decision_context.call_amount,
-        raise_amount=decision_context.raise_amount,
+        pot_size=pot_size,
+        call_amount=call_amount,
+        raise_amount=primary_raise_amount,
         simulations=simulations,
-        table_actions=decision_context.table_actions_before_decision,
-        active_opponent_count=decision_context.active_opponent_count,
+        table_actions=table_actions,
+        active_opponent_count=active_opponent_count,
+        candidate_raise_amounts=candidate_raise_amounts,
     )
 
 
@@ -326,8 +380,14 @@ def print_solver_result(result: SolverResult) -> None:
     print(f"Equity:      {result.equity:.4f}")
     print()
     print(f"EV fold:     {result.ev_fold:.4f}")
+    print(f"EV check:    {result.ev_check:.4f}")
     print(f"EV call:     {result.ev_call:.4f}")
-    print(f"EV raise:    {result.ev_raise:.4f}")
+    print(f"EV raise:    {result.ev_raise:.4f}"
+          f"{f' at {result.best_raise_amount:.2f} BB' if result.best_raise_amount > 0.0 else ''}")
+    print("Action EVs:")
+    for action_ev in result.action_evs:
+        amount = f" {action_ev.amount:.2f} BB" if action_ev.amount > 0.0 else ""
+        print(f"  {action_to_string(action_ev.action)}{amount}: {action_ev.ev:+.4f}")
     print()
     print(f"Recommendation: {action_to_string(result.recommendation)}")
     print(f"Explanation:    {result.explanation}")
@@ -342,11 +402,9 @@ def print_input_guide() -> None:
     print("Valid examples: Ah, Ks, Qd, Tc, 7c")
     print("Invalid examples: 10h, Kx, ZZ, duplicated cards like Ah Ah")
     print()
-    print("In a new analysis, actions are entered in order: UTG, HJ, CO, BTN, SB, BB.")
-    print("SB and BB are posted automatically as 0.50 BB and 1.00 BB.")
-    print("Calls automatically add only the amount needed to match the current highest bet.")
-    print("If a player raises, earlier active players will get another decision.")
-    print("The betting loop ends only when every active player has matched the highest bet or folded.")
+    print("In a new analysis, enter Hero position and cards first.")
+    print("Then enter the current pot, call amount, candidate raise sizes, active opponents, and prior actions.")
+    print("Use call amount 0 when Hero can check. The solver will compare check against raise options.")
     print_opening_ranges()
 
 

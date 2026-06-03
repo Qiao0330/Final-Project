@@ -21,6 +21,7 @@ class EquityInput:
     hero_hand: HoleCards
     opponent_count: int
     simulations: int
+    board_cards: tuple[Card, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -35,8 +36,8 @@ class EquityResult:
     equity: float
 
 
-def _available_deck(hero_hand: HoleCards) -> tuple[Card, ...]:
-    known_cards = {hero_hand.card1, hero_hand.card2}
+def _available_deck(hero_hand: HoleCards, board_cards: tuple[Card, ...]) -> tuple[Card, ...]:
+    known_cards = {hero_hand.card1, hero_hand.card2, *board_cards}
     return tuple(card for card in FULL_DECK if card not in known_cards)
 
 
@@ -65,12 +66,14 @@ def estimate_preflop_equity(equity_input: EquityInput) -> EquityResult:
     losses = 0
     hero_card1 = equity_input.hero_hand.card1
     hero_card2 = equity_input.hero_hand.card2
-    available_deck = _available_deck(equity_input.hero_hand)
-    cards_needed = opponent_count * 2 + BOARD_SIZE
+    board_cards = tuple(equity_input.board_cards[:BOARD_SIZE])
+    available_deck = _available_deck(equity_input.hero_hand, board_cards)
+    cards_needed = opponent_count * 2 + max(0, BOARD_SIZE - len(board_cards))
 
     for _ in range(simulations):
         dealt = sample(available_deck, cards_needed)
-        board = tuple(dealt[opponent_count * 2:opponent_count * 2 + BOARD_SIZE])
+        runout = tuple(dealt[opponent_count * 2:opponent_count * 2 + max(0, BOARD_SIZE - len(board_cards))])
+        board = (*board_cards, *runout)
         hero_value = _make_player_value(hero_card1, hero_card2, board)
 
         has_better_opponent = False
