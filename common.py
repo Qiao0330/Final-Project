@@ -37,6 +37,10 @@ class Position(IntEnum):
     INVALID = 6
 
 
+TABLE_POSITIONS = (Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB)
+TABLE_POSITION_NAMES = tuple(position.name for position in TABLE_POSITIONS)
+
+
 class Action(IntEnum):
     FOLD = 0
     CALL = 1

@@ -3,17 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from random import sample
 
-from common import Card, HoleCards, Rank, Suit
+from card import BOARD_SIZE, FULL_DECK
+from common import Card, HoleCards
 from poker_eval import compare_hand_values, evaluate_7cards
 
-DECK_SIZE = 52
-BOARD_SIZE = 5
 MAX_OPPONENTS = 5
-FULL_DECK = tuple(
-    Card(rank=Rank(rank), suit=Suit(suit))
-    for suit in range(int(Suit.CLUBS), int(Suit.SPADES) + 1)
-    for rank in range(int(Rank.TWO), int(Rank.ACE) + 1)
-)
 
 
 @dataclass(frozen=True)

@@ -3,19 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from random import choices, sample
 
-from common import Action, Card, HoleCards, PlayerAction, Position, Rank, Suit
+from card import BOARD_SIZE, FULL_DECK
+from common import TABLE_POSITIONS, Action, Card, HoleCards, PlayerAction, Position
 from poker_eval import compare_hand_values, evaluate_7cards
 from range_model import get_hand_class, get_preflop_frequency, hand_strength_score, position_to_string
 from strategy_profile import load_strategy_profile
 
 
-BOARD_SIZE = 5
-POSITIONS = (Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB)
-FULL_DECK = tuple(
-    Card(rank=Rank(rank), suit=Suit(suit))
-    for suit in range(int(Suit.CLUBS), int(Suit.SPADES) + 1)
-    for rank in range(int(Rank.TWO), int(Rank.ACE) + 1)
-)
+POSITIONS = TABLE_POSITIONS
 
 
 @dataclass(frozen=True)

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from common import Action, PlayerAction, Position
+from common import TABLE_POSITIONS, Action, PlayerAction, Position
 from range_model import position_to_string
 
 
-POSITIONS = (Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB)
+POSITIONS = TABLE_POSITIONS
 EFFECTIVE_STACK_BB = 100.0
 
 

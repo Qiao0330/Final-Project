@@ -6,12 +6,10 @@ from adapter_utils import (
     cards_to_text,
     default_stacks,
     hand_to_text,
-    mixed_frequencies_from_action_evs,
     mixed_frequencies_from_named_evs,
     parse_board_text,
     parse_hand_text,
     parse_position_name,
-    solver_action_ev_to_dict,
 )
 from betting_state import betting_state_to_dict, derive_preflop_state
 from common import Action, Card, HoleCards, Position, Rank, Suit
@@ -150,17 +148,6 @@ def get_study_view_data(request: dict) -> dict:
             f"{result.explanation}"
         ),
     }
-
-
-def _recommended_ev(result) -> float:
-    for action_ev in result.action_evs:
-        if action_ev.action != result.recommendation:
-            continue
-        if action_ev.action != Action.RAISE:
-            return action_ev.ev
-        if abs(action_ev.amount - result.best_raise_amount) < 0.0001:
-            return action_ev.ev
-    return 0.0
 
 
 def _actions_from_grid_item(item: dict) -> list[dict]:
@@ -515,11 +502,6 @@ def _best_raise_label(raise_evs: dict[str, float]) -> str:
 
 def _raise_label(amount: float) -> str:
     return f"Raise {amount:.1f}"
-
-
-def _action_frequency_key(action_ev) -> tuple[Action, float]:
-    amount = action_ev.amount if action_ev.action == Action.RAISE else 0.0
-    return (action_ev.action, round(amount, 4))
 
 
 def _range_simulations(simulations: int, request: dict) -> int:

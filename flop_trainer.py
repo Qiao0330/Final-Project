@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from random import choice, sample
 
-from card import card_to_string
+from card import FULL_DECK, card_to_string
 from common import Action, Card, HoleCards, Position, Rank, Suit
 from range_model import position_to_string
 
@@ -16,13 +16,6 @@ POSITION_IP = "IP"
 POSITION_OOP = "OOP"
 PFA_CHECK = "check"
 PFA_BET = "bet"
-
-FULL_DECK = tuple(
-    Card(rank=Rank(rank), suit=Suit(suit))
-    for suit in range(int(Suit.CLUBS), int(Suit.SPADES) + 1)
-    for rank in range(int(Rank.TWO), int(Rank.ACE) + 1)
-)
-
 
 @dataclass(frozen=True)
 class FlopOption:

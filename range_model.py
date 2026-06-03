@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 
-from card import is_same_card
+from card import FULL_DECK, is_same_card
 from common import Card, HoleCards, Position, Rank, Suit
 
 
@@ -285,17 +285,11 @@ def _estimate_single_opponent_fold_probability(
     total = 0
     folds = 0
 
-    cards = [
-        Card(rank=Rank(rank), suit=Suit(suit))
-        for rank in range(int(Rank.TWO), int(Rank.ACE) + 1)
-        for suit in range(int(Suit.CLUBS), int(Suit.SPADES) + 1)
-    ]
-
-    for first_index, first in enumerate(cards):
+    for first_index, first in enumerate(FULL_DECK):
         if is_same_card(first, hero_hand.card1) or is_same_card(first, hero_hand.card2):
             continue
 
-        for second in cards[first_index + 1:]:
+        for second in FULL_DECK[first_index + 1:]:
             if is_same_card(second, hero_hand.card1) or is_same_card(second, hero_hand.card2):
                 continue
 

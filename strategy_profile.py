@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from common import TABLE_POSITION_NAMES
 
-POSITIONS = ("UTG", "HJ", "CO", "BTN", "SB", "BB")
+POSITIONS = TABLE_POSITION_NAMES
 PROFILE_KEYS = ("unacted", "check", "call", "raise", "large_raise", "all_in")
 STRATEGY_PROFILE_PATH = Path(__file__).resolve().parent / "strategy_profiles.json"
 

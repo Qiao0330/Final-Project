@@ -3,28 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from random import choices, choice, sample
 
-from card import card_to_string
-from common import Action, Card, HoleCards, PlayerAction, Position, Rank, Suit
+from card import BOARD_SIZE, FULL_DECK, card_to_string
+from common import TABLE_POSITIONS, Action, Card, HoleCards, PlayerAction, Position, Rank
 from poker_eval import compare_hand_values, evaluate_7cards
 from range_model import get_hand_class, get_preflop_frequency, position_to_string
 
 
-POSITIONS = (Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB)
-HERO_POSITIONS = (Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB)
+POSITIONS = TABLE_POSITIONS
+HERO_POSITIONS = TABLE_POSITIONS
 STACK_BB = 100.0
 DEFAULT_SIMULATIONS = 5000
-BOARD_SIZE = 5
 SCENARIO_OPEN_FIRST = "open_first"
 SCENARIO_FACING_OPEN = "facing_open"
 SCENARIO_FACING_3BET = "facing_3bet"
 SCENARIO_FACING_4BET = "facing_4bet"
-
-FULL_DECK = tuple(
-    Card(rank=Rank(rank), suit=Suit(suit))
-    for suit in range(int(Suit.CLUBS), int(Suit.SPADES) + 1)
-    for rank in range(int(Rank.TWO), int(Rank.ACE) + 1)
-)
-
 
 @dataclass(frozen=True)
 class TrainerOption:

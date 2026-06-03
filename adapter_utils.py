@@ -1,19 +1,11 @@
 from __future__ import annotations
 
 from card import card_to_string, parse_card, parse_hole_cards
-from common import Action, Card, HoleCards, PlayerAction, Position
+from common import TABLE_POSITIONS, Action, Card, HoleCards, PlayerAction, Position
 from range_model import position_to_string
-from solver import SolverActionEV
 
 
-POSITIONS_BY_NAME = {
-    "UTG": Position.UTG,
-    "HJ": Position.HJ,
-    "CO": Position.CO,
-    "BTN": Position.BTN,
-    "SB": Position.SB,
-    "BB": Position.BB,
-}
+POSITIONS_BY_NAME = {position.name: position for position in TABLE_POSITIONS}
 
 ACTIONS_BY_NAME = {
     "fold": Action.FOLD,
@@ -130,27 +122,6 @@ def action_to_wire_label(action: Action) -> str:
     return "unknown"
 
 
-def mixed_frequencies_from_action_evs(action_evs: tuple[SolverActionEV, ...]) -> dict[tuple[Action, float], float]:
-    if not action_evs:
-        return {}
-    best_ev = max(action_ev.ev for action_ev in action_evs)
-    weights: list[float] = []
-    for action_ev in action_evs:
-        gap = max(0.0, best_ev - action_ev.ev)
-        if gap >= MIXING_EDGE_BB:
-            weights.append(0.0)
-        else:
-            weights.append((1.0 - gap / MIXING_EDGE_BB) ** 2)
-    total_weight = sum(weights)
-    if total_weight <= 0.0:
-        best = max(action_evs, key=lambda item: item.ev)
-        return {_action_frequency_key(action_ev): 100.0 if action_ev == best else 0.0 for action_ev in action_evs}
-    return {
-        _action_frequency_key(action_ev): weight / total_weight * 100.0
-        for action_ev, weight in zip(action_evs, weights)
-    }
-
-
 def mixed_frequencies_from_named_evs(evs: dict[str, float]) -> dict[str, float]:
     if not evs:
         return {}
@@ -164,34 +135,6 @@ def mixed_frequencies_from_named_evs(evs: dict[str, float]) -> dict[str, float]:
         best_name = max(evs, key=lambda name: evs[name])
         return {name: 100.0 if name == best_name else 0.0 for name in evs}
     return {name: weight / total_weight * 100.0 for name, weight in weights.items()}
-
-
-def _action_frequency_key(action_ev: SolverActionEV) -> tuple[Action, float]:
-    amount = action_ev.amount if action_ev.action == Action.RAISE else 0.0
-    return (action_ev.action, round(amount, 4))
-
-
-def solver_action_ev_to_dict(
-    action_ev: SolverActionEV,
-    recommended_action: Action,
-    recommended_amount: float,
-    frequency: float = 0.0,
-) -> dict:
-    label = action_to_label(action_ev.action, action_ev.amount)
-    is_recommended = (
-        action_ev.action == recommended_action
-        and (
-            action_ev.action != Action.RAISE
-            or abs(action_ev.amount - recommended_amount) < 0.0001
-        )
-    )
-    return {
-        "name": label,
-        "frequency": frequency,
-        "ev": action_ev.ev,
-        "combos": None,
-        "is_recommended": is_recommended,
-    }
 
 
 def default_stacks() -> dict:
