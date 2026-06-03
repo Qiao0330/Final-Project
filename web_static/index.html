@@ -21,19 +21,18 @@
 
     <section id="study-view" class="workspace">
       <aside class="control-panel">
-        <h2>Spot</h2>
-        <div class="form-grid">
-          <label>Hero position
+        <div class="form-grid hidden">
+          <label class="hidden">Study position
             <select id="hero-position">
-              <option>BB</option>
-              <option>SB</option>
-              <option>BTN</option>
-              <option>CO</option>
-              <option>HJ</option>
               <option>UTG</option>
+              <option>HJ</option>
+              <option>CO</option>
+              <option>BTN</option>
+              <option>SB</option>
+              <option>BB</option>
             </select>
           </label>
-          <label>Hero hand
+          <label class="hidden">Hero hand
             <input id="hero-hand" value="AhAs" maxlength="4">
           </label>
           <label class="hidden">Street
@@ -71,7 +70,10 @@
         </div>
 
         <div class="action-builder">
-          <h3>Action history</h3>
+          <div class="action-line-heading">
+            <h3>Action Line</h3>
+            <button id="clear-actions" class="compact-button">Clear</button>
+          </div>
           <div class="action-row hidden">
             <select id="history-position">
               <option>UTG</option>
@@ -90,12 +92,19 @@
             <input id="history-amount" type="number" value="0" min="0" step="0.5" aria-label="Action amount">
             <button id="add-action" class="icon-button" title="Add action">+</button>
           </div>
-          <button id="clear-actions" class="secondary-button">Clear actions</button>
           <ol id="history-list" class="history-list"></ol>
         </div>
 
-        <button id="analyze-button" class="primary-button">Analyze</button>
+        <button id="analyze-button" class="primary-button hidden">Analyze</button>
         <p id="status-line" class="status-line"></p>
+
+        <aside class="detail-panel">
+          <div class="section-heading">
+            <h3>Selected Hand</h3>
+          </div>
+          <h2 id="detail-hand">Hand</h2>
+          <dl id="detail-stats"></dl>
+        </aside>
 
         <div class="strategy-editor hidden">
           <div class="section-heading">
@@ -118,47 +127,48 @@
       <section class="main-panel">
         <section class="table-builder">
           <div class="section-heading">
-            <h2>Table Action Builder</h2>
+            <h2>Action Line Builder</h2>
             <div class="seat-action-controls">
               <span id="node-status" class="node-status">Open</span>
-              <button class="seat-action active" data-seat-action="fold">Fold</button>
-              <button class="seat-action" data-seat-action="call">Call</button>
-              <button class="seat-action" data-seat-action="raise">Raise</button>
-              <button class="seat-action" data-seat-action="check">Check</button>
-              <button class="seat-action" data-seat-action="all-in">All-in</button>
               <input id="seat-action-amount" class="hidden" type="number" value="0" min="0" step="0.5" aria-label="Seat action amount">
             </div>
           </div>
           <div class="poker-table" aria-label="Six-max poker table">
-            <button class="seat seat-utg" data-seat="UTG">
-              <span>UTG</span>
-              <strong id="seat-state-UTG">empty</strong>
-            </button>
-            <button class="seat seat-hj" data-seat="HJ">
-              <span>HJ</span>
-              <strong id="seat-state-HJ">empty</strong>
-            </button>
-            <button class="seat seat-co" data-seat="CO">
-              <span>CO</span>
-              <strong id="seat-state-CO">empty</strong>
-            </button>
-            <button class="seat seat-btn" data-seat="BTN">
-              <span>BTN</span>
-              <strong id="seat-state-BTN">empty</strong>
-            </button>
-            <button class="seat seat-sb" data-seat="SB">
-              <span>SB</span>
-              <strong id="seat-state-SB">0.5 BB</strong>
-            </button>
-            <button class="seat seat-bb hero-seat" data-seat="BB">
-              <span>BB</span>
-              <strong id="seat-state-BB">Hero</strong>
-            </button>
+            <article class="seat seat-utg" data-seat="UTG">
+              <div class="seat-header"><span>UTG</span><strong>100</strong></div>
+              <div id="seat-state-UTG" class="seat-state">empty</div>
+              <div id="seat-actions-UTG" class="seat-action-list"></div>
+            </article>
+            <article class="seat seat-hj" data-seat="HJ">
+              <div class="seat-header"><span>HJ</span><strong>100</strong></div>
+              <div id="seat-state-HJ" class="seat-state">empty</div>
+              <div id="seat-actions-HJ" class="seat-action-list"></div>
+            </article>
+            <article class="seat seat-co" data-seat="CO">
+              <div class="seat-header"><span>CO</span><strong>100</strong></div>
+              <div id="seat-state-CO" class="seat-state">empty</div>
+              <div id="seat-actions-CO" class="seat-action-list"></div>
+            </article>
+            <article class="seat seat-btn" data-seat="BTN">
+              <div class="seat-header"><span>BTN</span><strong>100</strong></div>
+              <div id="seat-state-BTN" class="seat-state">empty</div>
+              <div id="seat-actions-BTN" class="seat-action-list"></div>
+            </article>
+            <article class="seat seat-sb" data-seat="SB">
+              <div class="seat-header"><span>SB</span><strong>99.5</strong></div>
+              <div id="seat-state-SB" class="seat-state">0.5 BB</div>
+              <div id="seat-actions-SB" class="seat-action-list"></div>
+            </article>
+            <article class="seat seat-bb" data-seat="BB">
+              <div class="seat-header"><span>BB</span><strong>99</strong></div>
+              <div id="seat-state-BB" class="seat-state">1.0 BB</div>
+              <div id="seat-actions-BB" class="seat-action-list"></div>
+            </article>
             <div class="felt-center">
               <span>Pot</span>
               <strong id="table-pot">4.0 BB</strong>
               <small id="table-board">Board -</small>
-              <small id="table-hero">Hero BB AhAs</small>
+              <small id="table-hero">Viewing UTG</small>
               <small id="table-sizing">Min raise -</small>
             </div>
           </div>
@@ -166,20 +176,20 @@
 
         <div class="summary-band">
           <div>
-            <span class="metric-label">Recommended</span>
-            <strong id="recommendation">-</strong>
+            <span class="metric-label">Viewing Position</span>
+            <strong id="summary-position">-</strong>
           </div>
           <div>
-            <span class="metric-label">Equity</span>
-            <strong id="equity">-</strong>
+            <span class="metric-label">Fold</span>
+            <strong id="summary-fold">-</strong>
           </div>
           <div>
-            <span class="metric-label">EV Call</span>
-            <strong id="ev-call">-</strong>
+            <span class="metric-label">Call/Check</span>
+            <strong id="summary-call">-</strong>
           </div>
           <div>
-            <span class="metric-label">EV Raise</span>
-            <strong id="ev-raise">-</strong>
+            <span class="metric-label">Raise</span>
+            <strong id="summary-raise">-</strong>
           </div>
         </div>
 
@@ -195,11 +205,6 @@
             </div>
             <div id="range-grid" class="range-grid" aria-label="169 hand class matrix"></div>
           </section>
-
-          <aside class="detail-panel">
-            <h2 id="detail-hand">Hand</h2>
-            <dl id="detail-stats"></dl>
-          </aside>
         </div>
 
         <section class="opponent-panel">

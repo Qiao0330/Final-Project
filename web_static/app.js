@@ -1,13 +1,12 @@
+const SEATS = ["UTG", "HJ", "CO", "BTN", "SB", "BB"];
+
 const state = {
-  history: [
-    { position: "UTG", action: "raise", amount: 2.5 },
-    { position: "HJ", action: "fold", amount: 0 },
-  ],
+  history: [],
+  studyPosition: "UTG",
   studyData: null,
   selectedHand: null,
   strategyProfile: null,
   trainerQuestion: null,
-  selectedSeatAction: "fold",
 };
 
 const el = (id) => document.getElementById(id);
@@ -28,11 +27,23 @@ function countRaises() {
   return state.history.filter((record) => record.action === "raise").length;
 }
 
-function autoRaiseAmount(seat) {
+function currentStudyPosition() {
+  return state.studyPosition || state.studyData?.betting_state?.next_to_act || "UTG";
+}
+
+function setStudyPosition(position) {
+  state.studyPosition = position;
+  const positionInput = el("hero-position");
+  if (positionInput) {
+    positionInput.value = position;
+  }
+}
+
+function autoRaiseAmount(seat, action = "raise") {
   const bettingState = state.studyData?.betting_state;
   const currentBet = Number(bettingState?.current_bet_bb || 1);
   const raiseCount = countRaises();
-  if (state.selectedSeatAction === "all-in") {
+  if (action === "all-in") {
     return Number(bettingState?.max_raise_total_bb || 100);
   }
   if (raiseCount === 0) {
@@ -78,6 +89,12 @@ function setMode(mode) {
 function renderHistory() {
   const list = el("history-list");
   list.innerHTML = "";
+  if (state.history.length === 0) {
+    const item = document.createElement("li");
+    item.className = "empty-history";
+    item.textContent = "Root node";
+    list.appendChild(item);
+  }
   state.history.forEach((record, index) => {
     const item = document.createElement("li");
     item.textContent = `${record.position} ${record.action} ${formatNumber(record.amount, 1)} BB`;
@@ -87,7 +104,9 @@ function renderHistory() {
     remove.textContent = "x";
     remove.addEventListener("click", () => {
       state.history.splice(index, 1);
+      setStudyPosition(inferNextSeatAfterHistory());
       renderHistory();
+      analyze();
     });
     item.append(" ", remove);
     list.appendChild(item);
@@ -96,8 +115,10 @@ function renderHistory() {
 }
 
 function buildStudyPayload() {
+  const studyPosition = currentStudyPosition();
+  setStudyPosition(studyPosition);
   return {
-    hero_position: el("hero-position").value,
+    hero_position: studyPosition,
     hero_hand: el("hero-hand").value,
     street: "preflop",
     board_cards: "",
@@ -117,6 +138,7 @@ async function analyze() {
   try {
     const data = await postJson("/api/study", buildStudyPayload());
     state.studyData = data;
+    setStudyPosition(data.hero_position || data.betting_state?.next_to_act || currentStudyPosition());
     state.selectedHand = data.range_grid.find((item) => item.is_selected) || data.range_grid[0];
     renderStudy(data);
     el("status-line").textContent = `Loaded ${data.range_grid.length} hand classes with ${data.range_simulations} range sims each against ${data.opponent_ranges.length} opponent ranges.`;
@@ -140,10 +162,7 @@ function renderStudy(data) {
   if (errors.length > 0) {
     el("status-line").textContent = errors.join("; ");
   }
-  el("recommendation").textContent = data.selected_hand.recommended;
-  el("equity").textContent = `${formatNumber(data.metrics.equity, 1)}%`;
-  el("ev-call").textContent = formatNumber(data.metrics.ev_call, 3);
-  el("ev-raise").textContent = formatNumber(data.metrics.ev_raise, 3);
+  renderRangeSummary(data.range_grid);
   renderRangeGrid(data.range_grid);
   renderDetail(state.selectedHand);
   renderHandsTable(data.range_grid);
@@ -172,6 +191,46 @@ function renderOpponentRanges(ranges) {
       </article>
     `)
     .join("");
+}
+
+function handComboCount(hand) {
+  if (!hand || hand.length < 2) return 1;
+  if (hand[0] === hand[1]) return 6;
+  if (hand.endsWith("s")) return 4;
+  if (hand.endsWith("o")) return 12;
+  return 1;
+}
+
+function rangeActionSummary(items) {
+  const totals = {
+    fold: 0,
+    call: 0,
+    raise: 0,
+    combos: 0,
+  };
+  items.forEach((item) => {
+    const combos = handComboCount(item.hand);
+    const frequencies = rangeActionFrequencies(item);
+    totals.fold += frequencies.fold * combos;
+    totals.call += frequencies.call * combos;
+    totals.raise += frequencies.raise * combos;
+    totals.combos += combos;
+  });
+  const divisor = Math.max(1, totals.combos);
+  return {
+    fold: totals.fold / divisor,
+    call: totals.call / divisor,
+    raise: totals.raise / divisor,
+    combos: totals.combos,
+  };
+}
+
+function renderRangeSummary(items) {
+  const summary = rangeActionSummary(items);
+  el("summary-position").textContent = currentStudyPosition();
+  el("summary-fold").textContent = `${formatNumber(summary.fold, 1)}%`;
+  el("summary-call").textContent = `${formatNumber(summary.call, 1)}%`;
+  el("summary-raise").textContent = `${formatNumber(summary.raise, 1)}%`;
 }
 
 async function loadStrategyProfile() {
@@ -255,8 +314,7 @@ async function saveStrategyProfile() {
 }
 
 function renderTableState() {
-  const heroPosition = el("hero-position").value;
-  const heroHand = el("hero-hand").value;
+  const studyPosition = currentStudyPosition();
   const street = el("street").value;
   const boardCards = el("board-cards").value.trim();
   const bettingState = state.studyData?.betting_state;
@@ -265,25 +323,26 @@ function renderTableState() {
   state.history.forEach((record) => {
     latestBySeat[record.position] = record;
   });
-  ["UTG", "HJ", "CO", "BTN", "SB", "BB"].forEach((seat) => {
-    const button = document.querySelector(`.seat[data-seat="${seat}"]`);
+  SEATS.forEach((seat) => {
+    const seatNode = document.querySelector(`.seat[data-seat="${seat}"]`);
     const stateLabel = el(`seat-state-${seat}`);
     const record = latestBySeat[seat];
     const seatState = bettingState?.seats?.[seat];
-    button.classList.remove("hero-seat", "seat-state-fold", "seat-state-call", "seat-state-raise", "seat-state-check");
-    button.disabled = isClosed || (Boolean(bettingState) && !seatState?.can_act);
-    if (seat === heroPosition) {
-      button.classList.add("hero-seat");
+    seatNode.classList.remove("hero-seat", "study-seat", "seat-state-fold", "seat-state-call", "seat-state-raise", "seat-state-check", "seat-can-act", "seat-disabled");
+    seatNode.classList.toggle("seat-disabled", isClosed || (Boolean(bettingState) && !seatState?.can_act));
+    if (seat === studyPosition) {
+      seatNode.classList.add("study-seat");
     }
     if (seatState?.can_act) {
+      seatNode.classList.add("seat-can-act");
       stateLabel.textContent = seatState.to_call > 0
         ? `to call ${formatNumber(seatState.to_call, 1)}`
         : "to act";
     } else if (record) {
-      button.classList.add(`seat-state-${record.action}`);
+      seatNode.classList.add(`seat-state-${record.action}`);
       stateLabel.textContent = `${record.action} ${formatNumber(record.amount, 1)} BB`;
-    } else if (seat === heroPosition) {
-      stateLabel.textContent = "Hero";
+    } else if (seat === studyPosition) {
+      stateLabel.textContent = "Viewing";
     } else if (seat === "SB") {
       stateLabel.textContent = "0.5 BB";
     } else if (seat === "BB") {
@@ -291,6 +350,7 @@ function renderTableState() {
     } else {
       stateLabel.textContent = "empty";
     }
+    renderSeatActions(seat, seatState, isClosed);
   });
   el("table-pot").textContent = `${formatNumber(el("pot-bb").value, 1)} BB`;
   el("table-board").textContent = boardCards ? `${street} ${boardCards}` : `${street} board -`;
@@ -302,10 +362,10 @@ function renderTableState() {
   el("node-status").classList.toggle("closed", isClosed);
   document.querySelector(".poker-table").classList.toggle("closed-node", isClosed);
   el("table-hero").textContent = isClosed
-    ? `Hero ${heroPosition} ${heroHand} | Analysis locked`
+    ? `Viewing ${studyPosition} | Analysis locked`
     : nextToAct
-    ? `Hero ${heroPosition} ${heroHand} | Next ${nextToAct}`
-    : `Hero ${heroPosition} ${heroHand}`;
+    ? `Viewing ${studyPosition} | Next ${nextToAct}`
+    : `Viewing ${studyPosition}`;
   el("table-sizing").textContent = isClosed
     ? "Preflop betting round complete"
     : suggestedSizes.length
@@ -316,21 +376,90 @@ function renderTableState() {
   syncLegalActionButtons();
 }
 
+function renderSeatActions(seat, seatState, isClosed) {
+  const container = el(`seat-actions-${seat}`);
+  container.innerHTML = "";
+  if (isClosed || !seatState?.can_act) {
+    return;
+  }
+  const actions = seatState.available_actions || [];
+  actions.forEach((action) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `seat-line-action action-${action}`;
+    button.dataset.seat = seat;
+    button.dataset.action = action;
+    button.textContent = seatActionLabel(action, seatState);
+    container.appendChild(button);
+  });
+  if (actions.includes("raise")) {
+    const allIn = document.createElement("button");
+    allIn.type = "button";
+    allIn.className = "seat-line-action action-all-in";
+    allIn.dataset.seat = seat;
+    allIn.dataset.action = "all-in";
+    allIn.textContent = "All-in 100";
+    container.appendChild(allIn);
+  }
+}
+
+function seatActionLabel(action, seatState) {
+  if (action === "fold") return "Fold";
+  if (action === "check") return "Check";
+  if (action === "call") return `Call ${formatNumber(seatState?.to_call || 0, 1)}`;
+  if (action === "raise") return `Raise ${formatNumber(autoRaiseAmount(seatState?.position || "UTG", action), 1)}`;
+  return action;
+}
+
+function appendSeatAction(seat, action) {
+  const seatState = state.studyData?.betting_state?.seats?.[seat];
+  if (seatState && !seatState.can_act) {
+    return;
+  }
+  const normalizedAction = action === "all-in" ? "raise" : action;
+  const amount = normalizedAction === "call"
+    ? Number(seatState?.to_call || 0)
+    : normalizedAction === "raise"
+    ? autoRaiseAmount(seat, action)
+    : 0;
+  state.history.push({
+    position: seat,
+    action: normalizedAction,
+    amount: amount,
+  });
+  setStudyPosition(inferNextSeatAfterHistory());
+  renderHistory();
+  analyze();
+}
+
 function syncLegalActionButtons() {
-  const legalActions = state.studyData?.betting_state?.legal_actions;
-  const isClosed = Boolean(state.studyData?.betting_state?.is_closed);
-  document.querySelectorAll(".seat-action").forEach((button) => {
-    const action = button.dataset.seatAction;
-    const normalizedAction = action === "all-in" ? "raise" : action;
-    const allowed = !isClosed && (!legalActions || legalActions.includes(normalizedAction));
-    button.disabled = !allowed;
-    if (!allowed && state.selectedSeatAction === action) {
-      state.selectedSeatAction = legalActions?.[0] || "fold";
-    }
-  });
-  document.querySelectorAll(".seat-action").forEach((button) => {
-    button.classList.toggle("active", button.dataset.seatAction === state.selectedSeatAction);
-  });
+}
+
+function buildOpenHistoryToSeat(seat) {
+  const index = SEATS.indexOf(seat);
+  if (index <= 0) return [];
+  return SEATS.slice(0, index).map((position) => ({
+    position: position,
+    action: "fold",
+    amount: 0,
+  }));
+}
+
+function inferNextSeatAfterHistory() {
+  if (state.history.length === 0) return "UTG";
+  const actedSeats = new Set(state.history.map((record) => record.position));
+  return SEATS.find((seat) => !actedSeats.has(seat)) || currentStudyPosition();
+}
+
+function selectStudySeat(seat) {
+  const currentNextToAct = state.studyData?.betting_state?.next_to_act;
+  const hasOpenHistory = state.history.length > 0;
+  setStudyPosition(seat);
+  if (!hasOpenHistory || seat !== currentNextToAct) {
+    state.history = buildOpenHistoryToSeat(seat);
+  }
+  renderHistory();
+  analyze();
 }
 
 function renderRangeGrid(items) {
@@ -338,13 +467,21 @@ function renderRangeGrid(items) {
   grid.innerHTML = "";
   items.forEach((item) => {
     const cell = document.createElement("button");
-    const recClass = item.recommended.toLowerCase().replace(/\s+/g, "-");
-    cell.className = `hand-cell rec-${recClass}`;
+    const frequencies = rangeActionFrequencies(item);
+    cell.className = "hand-cell";
     cell.classList.toggle("selected", item.is_selected);
     cell.dataset.hand = item.hand;
+    cell.style.setProperty("--fold-pct", `${frequencies.fold}%`);
+    cell.style.setProperty("--call-pct", `${frequencies.fold + frequencies.call}%`);
+    cell.style.setProperty("--raise-pct", `${frequencies.fold + frequencies.call + frequencies.raise}%`);
     cell.innerHTML = `
       <span class="hand-name">${item.hand}</span>
-      <span class="hand-meta">${item.recommended} ${formatNumber(item.frequency, 0)}%</span>
+      <span class="freq-strip" aria-hidden="true">
+        <span class="freq-segment fold" style="width:${frequencies.fold}%"></span>
+        <span class="freq-segment call" style="width:${frequencies.call}%"></span>
+        <span class="freq-segment raise" style="width:${frequencies.raise}%"></span>
+      </span>
+      <span class="hand-meta">R ${formatNumber(frequencies.raise, 0)} C ${formatNumber(frequencies.call, 0)} F ${formatNumber(frequencies.fold, 0)}</span>
     `;
     cell.addEventListener("click", () => {
       state.selectedHand = item;
@@ -355,6 +492,18 @@ function renderRangeGrid(items) {
     });
     grid.appendChild(cell);
   });
+}
+
+function rangeActionFrequencies(item) {
+  const fold = Number(item.actions.Fold || 0);
+  const call = Number(item.actions.Call || item.actions.Check || 0);
+  const raise = Number(item.actions.Raise || 0);
+  const total = Math.max(1, fold + call + raise);
+  return {
+    fold: fold / total * 100,
+    call: call / total * 100,
+    raise: raise / total * 100,
+  };
 }
 
 function renderDetail(item) {
@@ -503,57 +652,39 @@ el("add-action").addEventListener("click", () => {
     action: el("history-action").value,
     amount: Number(el("history-amount").value),
   });
-  renderHistory();
-});
-
-el("clear-actions").addEventListener("click", () => {
-  state.history = [];
+  setStudyPosition(inferNextSeatAfterHistory());
   renderHistory();
   analyze();
 });
 
-document.querySelectorAll(".seat-action").forEach((button) => {
-  button.addEventListener("click", () => {
-    state.selectedSeatAction = button.dataset.seatAction;
-    if (state.selectedSeatAction === "raise") {
-      el("seat-action-amount").value = autoRaiseAmount(state.studyData?.betting_state?.next_to_act || "UTG");
-    } else if (state.selectedSeatAction === "all-in") {
-      el("seat-action-amount").value = state.studyData?.betting_state?.max_raise_total_bb || "100";
-    } else {
-      el("seat-action-amount").value = "0";
-    }
-    document.querySelectorAll(".seat-action").forEach((node) => {
-      node.classList.toggle("active", node === button);
-    });
-  });
+el("clear-actions").addEventListener("click", () => {
+  state.history = [];
+  setStudyPosition("UTG");
+  renderHistory();
+  analyze();
 });
 
-document.querySelectorAll(".seat").forEach((button) => {
-  button.addEventListener("click", () => {
-    const seat = button.dataset.seat;
-    const seatState = state.studyData?.betting_state?.seats?.[seat];
-    if (seatState && !seatState.can_act) {
-      return;
-    }
-    const action = state.selectedSeatAction === "all-in" ? "raise" : state.selectedSeatAction;
-    const amount = action === "call"
-      ? Number(seatState?.to_call || 0)
-      : action === "raise"
-      ? autoRaiseAmount(seat)
-      : Number(el("seat-action-amount").value);
-    state.history.push({
-      position: seat,
-      action: action,
-      amount: amount,
-    });
-    renderHistory();
+document.querySelector(".poker-table").addEventListener("click", (event) => {
+  const actionButton = event.target.closest(".seat-line-action");
+  if (actionButton) {
+    appendSeatAction(actionButton.dataset.seat, actionButton.dataset.action);
+    return;
+  }
+  const seatNode = event.target.closest(".seat");
+  if (seatNode) {
+    selectStudySeat(seatNode.dataset.seat);
+  }
+});
+
+["board-cards", "pot-bb", "call-bb", "opponents", "simulations"].forEach((id) => {
+  el(id).addEventListener("input", () => {
+    renderTableState();
     analyze();
   });
-});
-
-["hero-position", "hero-hand", "street", "board-cards", "pot-bb"].forEach((id) => {
-  el(id).addEventListener("input", renderTableState);
-  el(id).addEventListener("change", renderTableState);
+  el(id).addEventListener("change", () => {
+    renderTableState();
+    analyze();
+  });
 });
 
 function syncAutoStateControls() {
@@ -571,11 +702,13 @@ function syncAutoStateControls() {
 el("auto-state").addEventListener("change", () => {
   syncAutoStateControls();
   renderTableState();
+  analyze();
 });
 
 el("street").addEventListener("change", () => {
   syncAutoStateControls();
   renderTableState();
+  analyze();
 });
 
 el("analyze-button").addEventListener("click", analyze);
