@@ -79,16 +79,25 @@ class PositionStats:
     correct: int = 0
 
 
-def generate_random_scenario() -> TrainerScenario:
+def generate_random_scenario(scenario_type_filter: str | None = None) -> TrainerScenario:
     """Generate a random preflop training spot."""
-    hero_position = choice(HERO_POSITIONS)
+    scenario_type = scenario_type_filter
+    if scenario_type == SCENARIO_FACING_OPEN:
+        hero_position = choice((Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB))
+    elif scenario_type == SCENARIO_FACING_3BET:
+        hero_position = choice((Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB))
+    elif scenario_type == SCENARIO_FACING_4BET:
+        hero_position = choice((Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB))
+    else:
+        hero_position = choice(HERO_POSITIONS)
+        possible_scenario_types = [SCENARIO_OPEN_FIRST if hero_position == Position.UTG else SCENARIO_FACING_OPEN]
+        if hero_position != Position.BB:
+            possible_scenario_types.append(SCENARIO_FACING_3BET)
+        if hero_position != Position.UTG:
+            possible_scenario_types.append(SCENARIO_FACING_4BET)
+        scenario_type = choice(possible_scenario_types)
+
     hero_contribution = _starting_contribution(hero_position)
-    possible_scenario_types = [SCENARIO_OPEN_FIRST if hero_position == Position.UTG else SCENARIO_FACING_OPEN]
-    if hero_position != Position.BB:
-        possible_scenario_types.append(SCENARIO_FACING_3BET)
-    if hero_position != Position.UTG:
-        possible_scenario_types.append(SCENARIO_FACING_4BET)
-    scenario_type = choice(possible_scenario_types)
     hero_hand = _generate_hero_hand_for_scenario(hero_position, scenario_type)
 
     if scenario_type == SCENARIO_OPEN_FIRST:
@@ -262,12 +271,13 @@ def run_training_round(simulations: int = DEFAULT_SIMULATIONS) -> None:
 
 
 def run_training_session(simulations: int = DEFAULT_SIMULATIONS) -> None:
+    scenario_type_filter = _read_training_mode()
     total_attempts = 0
     total_correct = 0
     position_stats = {position: PositionStats() for position in HERO_POSITIONS}
 
     while True:
-        scenario = generate_random_scenario()
+        scenario = generate_random_scenario(scenario_type_filter)
         print()
         print(format_scenario(scenario))
         selected_index = _read_choice(len(scenario.options))
@@ -287,6 +297,24 @@ def run_training_session(simulations: int = DEFAULT_SIMULATIONS) -> None:
             break
 
     print(_format_session_summary(total_attempts, total_correct, position_stats))
+
+
+def _read_training_mode() -> str | None:
+    print()
+    print("Preflop training mode")
+    print("---------------------")
+    print("1. Random preflop spots")
+    print("2. Facing an open raise")
+    print("3. Facing a 3-bet")
+    print("4. Facing a 4-bet")
+
+    choice = _read_choice(4)
+    return {
+        0: None,
+        1: SCENARIO_FACING_OPEN,
+        2: SCENARIO_FACING_3BET,
+        3: SCENARIO_FACING_4BET,
+    }[choice]
 
 
 def _make_options(call_amount: float, open_size: float, hero_contribution: float) -> tuple[TrainerOption, ...]:
