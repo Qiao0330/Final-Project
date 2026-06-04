@@ -5,7 +5,7 @@ from random import choice, sample
 
 from card import FULL_DECK, card_to_string
 from common import Action, Card, HoleCards, Position, Rank, Suit
-from range_model import get_hand_class, position_to_string
+from range_model import get_hand_class, get_preflop_frequency, position_to_string
 
 
 STACK_BB = 100.0
@@ -71,6 +71,8 @@ class FlopTexture:
     made_strength: int
     draw_strength: int
     high_card_strength: int
+    backdoor_flush: bool
+    backdoor_straight: bool
     is_suited: bool
     is_connected: bool
     summary: str
@@ -79,13 +81,13 @@ class FlopTexture:
 def generate_random_flop_scenario() -> FlopScenario:
     pot_type, pot_size, remaining_stack = _random_pot_setup()
     hero_role = choice((ROLE_AGGRESSOR, ROLE_DEFENDER))
-    hero_hand = _generate_hand_for_pot_type(pot_type, hero_role)
-    available_board = [card for card in FULL_DECK if card not in (hero_hand.card1, hero_hand.card2)]
-    flop_cards = sample(available_board, BOARD_SIZE)
-    flop = (flop_cards[0], flop_cards[1], flop_cards[2])
     pfa_position, defender_position = _random_position_pair()
     hero_table_position = pfa_position if hero_role == ROLE_AGGRESSOR else defender_position
     villain_position = defender_position if hero_role == ROLE_AGGRESSOR else pfa_position
+    hero_hand = _generate_hand_for_pot_type(pot_type, hero_role, hero_table_position)
+    available_board = [card for card in FULL_DECK if card not in (hero_hand.card1, hero_hand.card2)]
+    flop_cards = sample(available_board, BOARD_SIZE)
+    flop = (flop_cards[0], flop_cards[1], flop_cards[2])
     preflop_summary = _make_preflop_summary(
         pot_type,
         hero_role,
@@ -201,6 +203,7 @@ def format_flop_answer(answer: FlopAnswer) -> str:
         "Training result",
         "---------------",
         f"Board read: {texture.summary}",
+        f"Suggested betting structure: {_betting_strategy(answer.scenario, texture)}",
         f"Your choice: {selected.option.label}",
         f"Best choice: {best.option.label}",
         f"Result: {'correct' if answer.is_correct else 'not correct'}",
@@ -258,12 +261,15 @@ def _make_check_bet_options(
         (1.0 / 3.0, "1/3 pot"),
         (0.50, "1/2 pot"),
         (0.75, "3/4 pot"),
+        (1.25, "125% pot overbet"),
+        (1.50, "150% pot overbet"),
     ):
         amount = min(remaining_stack, round(pot_size * fraction, 1))
         if amount in seen_amounts:
             continue
         seen_amounts.add(amount)
-        options.append(FlopOption(f"Bet {amount:.1f} BB ({fraction_label})", Action.RAISE, amount))
+        capped = "all-in, " if amount < round(pot_size * fraction, 1) else ""
+        options.append(FlopOption(f"Bet {amount:.1f} BB ({capped}{fraction_label})", Action.RAISE, amount))
 
     return tuple(options)
 
@@ -291,13 +297,20 @@ def _random_pot_setup() -> tuple[str, float, float]:
     }[pot_type]
 
 
-def _generate_hand_for_pot_type(pot_type: str, hero_role: str) -> HoleCards:
+def _generate_hand_for_pot_type(
+    pot_type: str,
+    hero_role: str,
+    hero_position: Position,
+) -> HoleCards:
     while True:
         cards = sample(FULL_DECK, 2)
         hand = HoleCards(cards[0], cards[1])
         hand_class = get_hand_class(hand)
+        open_frequency = get_preflop_frequency(hero_position, hand_class).open_frequency
 
-        if pot_type == POT_SINGLE_RAISED:
+        if pot_type == POT_SINGLE_RAISED and hero_role == ROLE_AGGRESSOR and open_frequency > 0.0:
+            return hand
+        if pot_type == POT_SINGLE_RAISED and hero_role == ROLE_DEFENDER and _is_reasonable_calling_hand(hand_class):
             return hand
         if pot_type == POT_3BET and _is_reasonable_3bet_pot_hand(hand_class):
             return hand
@@ -305,6 +318,16 @@ def _generate_hand_for_pot_type(pot_type: str, hero_role: str) -> HoleCards:
             return hand
         if pot_type == POT_5BET and _is_reasonable_5bet_pot_hand(hand_class, hero_role):
             return hand
+
+
+def _is_reasonable_calling_hand(hand_class) -> bool:
+    if hand_class.pair:
+        return True
+    if hand_class.suited and hand_class.high_rank >= int(Rank.SEVEN):
+        return True
+    if hand_class.high_rank == int(Rank.ACE):
+        return True
+    return hand_class.high_rank >= int(Rank.TEN) and hand_class.low_rank >= int(Rank.EIGHT)
 
 
 def _is_reasonable_3bet_pot_hand(hand_class) -> bool:
@@ -419,17 +442,84 @@ def _score_flop_option(scenario: FlopScenario, texture: FlopTexture, option: Flo
         score -= 2.0
     if texture.made_strength <= 2 and texture.draw_strength == 0:
         score -= 2.0
+
     size_ratio = option.amount / scenario.pot_size
-    if texture.made_strength >= 4:
-        score += min(2.0, size_ratio * 1.8)
-    elif texture.draw_strength >= 2:
-        score += max(0.0, 1.2 - abs(size_ratio - 0.50))
-    elif texture.made_strength <= 1:
-        score += max(0.0, 0.8 - size_ratio)
+    strategy = _betting_strategy(scenario, texture)
+    premium_value = texture.made_strength >= 5
+    strong_value = texture.made_strength >= 4
+    quality_bluff = (
+        texture.made_strength <= 1
+        and (
+            texture.draw_strength >= 2
+            or texture.backdoor_flush
+            or texture.backdoor_straight
+        )
+    )
+
+    if strategy == "polarized":
+        if premium_value:
+            score += 2.5 - abs(size_ratio - 1.25)
+        elif strong_value or quality_bluff:
+            score += 1.8 - abs(size_ratio - 0.75)
+        else:
+            score -= 1.8 + max(0.0, size_ratio - 0.50) * 2.0
     else:
-        score -= max(0.0, size_ratio - 0.50)
-    reason = "betting or raising is preferred with value hands, strong draws, and some pressure hands"
+        if strong_value:
+            score += 1.8 - abs(size_ratio - 0.50)
+        elif texture.draw_strength >= 2:
+            score += 1.4 - abs(size_ratio - 0.50)
+        elif texture.made_strength == 3:
+            score += 1.0 - abs(size_ratio - 1.0 / 3.0)
+        elif quality_bluff:
+            score += 0.9 - abs(size_ratio - 0.25)
+        else:
+            score -= 1.0 + max(0.0, size_ratio - 0.50)
+
+    if _has_range_bet_advantage(scenario):
+        if size_ratio <= 1.0 / 3.0:
+            if quality_bluff:
+                score += 5.8 - abs(size_ratio - 1.0 / 3.0) * 2.0
+            else:
+                score += 2.0
+        elif size_ratio <= 0.50:
+            score += 2.5 if quality_bluff else 0.8
+        elif texture.made_strength < 4:
+            score -= 1.5
+
+    if size_ratio > 1.0 and not (premium_value or quality_bluff):
+        score -= 3.0
+
+    reason = (
+        f"{strategy} sizing: large bets favor premium value and quality bluffs; "
+        "small and medium bets support a wider linear range"
+    )
     return FlopOptionResult(option, score, reason)
+
+
+def _betting_strategy(scenario: FlopScenario, texture: FlopTexture) -> str:
+    if scenario.pot_type in (POT_4BET, POT_5BET):
+        return "linear"
+    if _has_range_bet_advantage(scenario):
+        return "linear"
+    if texture.is_connected or _is_monotone_board(scenario.flop):
+        return "polarized"
+    return "linear"
+
+
+def _has_range_bet_advantage(scenario: FlopScenario) -> bool:
+    if scenario.hero_role != ROLE_AGGRESSOR:
+        return False
+
+    board_ranks = sorted((int(card.rank) for card in scenario.flop), reverse=True)
+    high_card = board_ranks[0]
+    rank_span = high_card - board_ranks[-1]
+    paired = len(set(board_ranks)) < 3
+
+    return high_card >= int(Rank.KING) and (rank_span >= 5 or paired)
+
+
+def _is_monotone_board(flop: tuple[Card, Card, Card]) -> bool:
+    return len({card.suit for card in flop}) == 1
 
 
 def _analyze_flop_texture(hero_hand: HoleCards, flop: tuple[Card, Card, Card]) -> FlopTexture:
@@ -473,6 +563,8 @@ def _analyze_flop_texture(hero_hand: HoleCards, flop: tuple[Card, Card, Card]) -
 
     flush_draw = any(count >= 4 for count in suit_counts.values())
     straight_draw = _has_straight_draw([int(card.rank) for card in cards])
+    backdoor_flush = not flush_draw and _has_backdoor_flush(hero_hand, flop)
+    backdoor_straight = not straight_draw and _has_backdoor_straight(hero_hand, flop)
     draw_strength = 0
     if flush_draw:
         draw_strength += 2
@@ -483,6 +575,10 @@ def _analyze_flop_texture(hero_hand: HoleCards, flop: tuple[Card, Card, Card]) -
     if flush_draw and straight_draw:
         draw_strength += 1
         summary_parts.append("combo draw")
+    if backdoor_flush:
+        summary_parts.append("backdoor flush draw")
+    if backdoor_straight:
+        summary_parts.append("backdoor straight draw")
 
     high_card_strength = sum(1 for rank in hero_ranks if rank >= int(Rank.JACK))
     is_suited = len(set(card.suit for card in flop)) <= 2
@@ -492,6 +588,8 @@ def _analyze_flop_texture(hero_hand: HoleCards, flop: tuple[Card, Card, Card]) -
         made_strength=made_strength,
         draw_strength=draw_strength,
         high_card_strength=high_card_strength,
+        backdoor_flush=backdoor_flush,
+        backdoor_straight=backdoor_straight,
         is_suited=is_suited,
         is_connected=is_connected,
         summary=", ".join(summary_parts),
@@ -508,6 +606,31 @@ def _has_straight_draw(ranks: list[int]) -> bool:
         if len(unique & window) >= 4:
             return True
 
+    return False
+
+
+def _has_backdoor_flush(hero_hand: HoleCards, flop: tuple[Card, Card, Card]) -> bool:
+    all_cards = (hero_hand.card1, hero_hand.card2, *flop)
+    for suit in (Suit.CLUBS, Suit.DIAMONDS, Suit.HEARTS, Suit.SPADES):
+        suited_cards = [card for card in all_cards if card.suit == suit]
+        hero_has_suit = hero_hand.card1.suit == suit or hero_hand.card2.suit == suit
+        if len(suited_cards) == 3 and hero_has_suit:
+            return True
+    return False
+
+
+def _has_backdoor_straight(hero_hand: HoleCards, flop: tuple[Card, Card, Card]) -> bool:
+    ranks = {int(card.rank) for card in (hero_hand.card1, hero_hand.card2, *flop)}
+    hero_ranks = {int(hero_hand.card1.rank), int(hero_hand.card2.rank)}
+    if int(Rank.ACE) in ranks:
+        ranks.add(1)
+        if int(Rank.ACE) in hero_ranks:
+            hero_ranks.add(1)
+
+    for start in range(1, 11):
+        window = set(range(start, start + 5))
+        if len(ranks & window) == 3 and hero_ranks & window:
+            return True
     return False
 
 
