@@ -6,7 +6,7 @@ from random import choices, choice, sample
 from card import BOARD_SIZE, FULL_DECK, card_to_string
 from common import TABLE_POSITIONS, Action, Card, HoleCards, PlayerAction, Position, Rank
 from poker_eval import compare_hand_values, evaluate_7cards
-from range_model import get_hand_class, get_preflop_frequency, position_to_string
+from range_model import get_hand_class, get_preflop_frequency, players_behind_count, position_to_string
 
 
 POSITIONS = TABLE_POSITIONS
@@ -74,7 +74,9 @@ class PositionStats:
 def generate_random_scenario(scenario_type_filter: str | None = None) -> TrainerScenario:
     """Generate a random preflop training spot."""
     scenario_type = scenario_type_filter
-    if scenario_type == SCENARIO_FACING_OPEN:
+    if scenario_type == SCENARIO_OPEN_FIRST:
+        hero_position = choice((Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB))
+    elif scenario_type == SCENARIO_FACING_OPEN:
         hero_position = choice((Position.HJ, Position.CO, Position.BTN, Position.SB, Position.BB))
     elif scenario_type == SCENARIO_FACING_3BET:
         hero_position = choice((Position.UTG, Position.HJ, Position.CO, Position.BTN, Position.SB))
@@ -93,6 +95,11 @@ def generate_random_scenario(scenario_type_filter: str | None = None) -> Trainer
     hero_hand = _generate_hero_hand_for_scenario(hero_position, scenario_type)
 
     if scenario_type == SCENARIO_OPEN_FIRST:
+        prior_folds = tuple(
+            PlayerAction(position, Action.FOLD, 0.0)
+            for position in POSITIONS
+            if position < hero_position
+        )
         return TrainerScenario(
             hero_position=hero_position,
             hero_hand=hero_hand,
@@ -100,7 +107,7 @@ def generate_random_scenario(scenario_type_filter: str | None = None) -> Trainer
             open_size=0.0,
             pot_size=1.5,
             call_amount=0.0,
-            table_actions=(),
+            table_actions=prior_folds,
             options=_make_open_first_options(hero_contribution),
             scenario_type=SCENARIO_OPEN_FIRST,
         )
@@ -125,7 +132,7 @@ def generate_random_scenario(scenario_type_filter: str | None = None) -> Trainer
             amount_added = open_size
             if position == Position.SB:
                 amount_added = open_size - 0.5
-            table_actions.append(PlayerAction(position, Action.RAISE, amount_added))
+            table_actions.append(PlayerAction(position, Action.RAISE, open_size))
             pot_size += amount_added
         else:
             table_actions.append(PlayerAction(position, Action.FOLD, 0.0))
@@ -351,18 +358,21 @@ def _generate_facing_3bet_scenario(
     table_actions: list[PlayerAction] = []
     pot_size = 1.5
 
+    three_bet_seen = False
     for position in POSITIONS:
         if position == hero_position:
             amount_added = open_size - hero_contribution
-            table_actions.append(PlayerAction(position, Action.RAISE, amount_added))
+            table_actions.append(PlayerAction(position, Action.RAISE, open_size))
             pot_size += amount_added
         elif position == three_bettor_position:
             amount_added = three_bet_size - _starting_contribution(position)
-            table_actions.append(PlayerAction(position, Action.RAISE, amount_added))
+            table_actions.append(PlayerAction(position, Action.RAISE, three_bet_size))
             pot_size += amount_added
-            break
+            three_bet_seen = True
         else:
             table_actions.append(PlayerAction(position, Action.FOLD, 0.0))
+        if three_bet_seen and position == Position.BB:
+            break
 
     call_amount = three_bet_size - open_size
     return TrainerScenario(
@@ -413,17 +423,17 @@ def _generate_facing_4bet_scenario(
     for position in POSITIONS:
         if position == opener_position:
             amount_added = open_size - _starting_contribution(position)
-            table_actions.append(PlayerAction(position, Action.RAISE, amount_added))
+            table_actions.append(PlayerAction(position, Action.RAISE, open_size))
             pot_size += amount_added
         elif position == hero_position:
             amount_added = three_bet_size - hero_contribution
-            table_actions.append(PlayerAction(position, Action.RAISE, amount_added))
+            table_actions.append(PlayerAction(position, Action.RAISE, three_bet_size))
             pot_size += amount_added
-        elif position < hero_position:
+        else:
             table_actions.append(PlayerAction(position, Action.FOLD, 0.0))
 
     opener_extra = four_bet_size - open_size
-    table_actions.append(PlayerAction(opener_position, Action.RAISE, opener_extra))
+    table_actions.append(PlayerAction(opener_position, Action.RAISE, four_bet_size))
     pot_size += opener_extra
     call_amount = four_bet_size - three_bet_size
 
@@ -738,7 +748,7 @@ def _evaluate_open_first_option(
             ev=0.0,
             equity=0.0,
             fold_probability=0.0,
-            opponent_count=5,
+            opponent_count=players_behind_count(scenario.hero_position),
         )
 
     hand_class = get_hand_class(scenario.hero_hand)
@@ -763,7 +773,7 @@ def _evaluate_open_first_option(
         ev=ev,
         equity=equity,
         fold_probability=fold_probability,
-        opponent_count=5,
+        opponent_count=players_behind_count(scenario.hero_position),
     )
 
 
@@ -799,25 +809,26 @@ def _estimate_open_first_fold_probability(
     hand_class = get_hand_class(scenario.hero_hand)
 
     if option.total_bet >= STACK_BB:
-        base = 0.88
+        single_opponent_fold = 0.95
     else:
-        base = {
-            2.0: 0.42,
-            2.5: 0.38,
-            3.0: 0.35,
-        }.get(option.total_bet, 0.36)
+        single_opponent_fold = {
+            2.0: 0.80,
+            2.5: 0.78,
+            3.0: 0.75,
+        }.get(option.total_bet, 0.77)
 
     if open_frequency <= 0.0:
-        base -= 0.10
+        single_opponent_fold -= 0.04
     elif open_frequency >= 0.75:
-        base += 0.03
+        single_opponent_fold += 0.01
 
     if hand_class.high_rank == int(Rank.ACE):
-        base += 0.03
+        single_opponent_fold += 0.02
     elif hand_class.high_rank == int(Rank.KING):
-        base += 0.02
+        single_opponent_fold += 0.01
 
-    return max(0.05, min(0.95, base))
+    single_opponent_fold = max(0.05, min(0.98, single_opponent_fold))
+    return single_opponent_fold ** max(1, players_behind_count(scenario.hero_position))
 
 
 def _three_bet_range_candidates(scenario: TrainerScenario) -> list[tuple[HoleCards, float, float]]:

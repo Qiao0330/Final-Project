@@ -58,6 +58,7 @@ def estimate_preflop_equity(equity_input: EquityInput) -> EquityResult:
     wins = 0
     ties = 0
     losses = 0
+    equity_sum = 0.0
     hero_card1 = equity_input.hero_hand.card1
     hero_card2 = equity_input.hero_hand.card2
     board_cards = tuple(equity_input.board_cards[:BOARD_SIZE])
@@ -71,7 +72,7 @@ def estimate_preflop_equity(equity_input: EquityInput) -> EquityResult:
         hero_value = _make_player_value(hero_card1, hero_card2, board)
 
         has_better_opponent = False
-        has_equal_opponent = False
+        equal_opponents = 0
 
         for opponent_index in range(opponent_count):
             first = opponent_index * 2
@@ -82,19 +83,21 @@ def estimate_preflop_equity(equity_input: EquityInput) -> EquityResult:
                 has_better_opponent = True
                 break
             if comparison == 0:
-                has_equal_opponent = True
+                equal_opponents += 1
 
         if has_better_opponent:
             losses += 1
-        elif has_equal_opponent:
+        elif equal_opponents:
             ties += 1
+            equity_sum += 1.0 / (equal_opponents + 1)
         else:
             wins += 1
+            equity_sum += 1.0
 
     win_rate = wins / simulations
     tie_rate = ties / simulations
     loss_rate = losses / simulations
-    equity = (wins + 0.5 * ties) / simulations
+    equity = equity_sum / simulations
 
     return EquityResult(
         simulations=simulations,

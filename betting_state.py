@@ -37,43 +37,67 @@ def derive_preflop_state(
     contributions[Position.BB] = 1.0
     current_bet = 1.0
     last_raise_increment = 1.0
+    last_actor: Position | None = None
     validation_errors: list[str] = []
 
     for record in action_history:
         position = record.position
+        expected_position = _next_to_act(folded, contributions, current_bet, acted, last_actor)
+        if expected_position is None:
+            validation_errors.append("betting round is already closed")
+            continue
+        if position != expected_position:
+            validation_errors.append(
+                f"out-of-turn action: expected {position_to_string(expected_position)}, "
+                f"got {position_to_string(position)}"
+            )
+            continue
         if position in folded:
             validation_errors.append(f"{position_to_string(position)} already folded")
             continue
         if record.action == Action.FOLD:
             folded.add(position)
             acted.add(position)
+            last_actor = position
             continue
         if record.action == Action.CHECK:
             if current_bet > contributions[position]:
                 validation_errors.append(f"{position_to_string(position)} cannot check facing {current_bet - contributions[position]:.2f} BB")
+                continue
             acted.add(position)
+            last_actor = position
             continue
         if record.action == Action.CALL:
             amount_to_call = max(0.0, current_bet - contributions[position])
-            amount_added = record.amount if record.amount > 0.0 else amount_to_call
-            if amount_added > amount_to_call and contributions[position] + amount_added < EFFECTIVE_STACK_BB:
-                validation_errors.append(f"{position_to_string(position)} call exceeds required amount")
-            amount_added = min(amount_added, EFFECTIVE_STACK_BB - contributions[position])
+            if amount_to_call <= 0.0:
+                validation_errors.append(f"{position_to_string(position)} cannot call when check is available")
+                continue
+            amount_added = min(amount_to_call, EFFECTIVE_STACK_BB - contributions[position])
+            if record.amount > 0.0 and abs(record.amount - amount_added) > 1e-9:
+                validation_errors.append(
+                    f"{position_to_string(position)} call must add exactly {amount_added:.2f} BB"
+                )
+                continue
             contributions[position] += amount_added
             acted.add(position)
+            last_actor = position
             continue
         if record.action == Action.RAISE:
-            new_total = record.amount
+            new_total = min(record.amount, EFFECTIVE_STACK_BB)
             min_total = _min_raise_total(current_bet, last_raise_increment)
+            if current_bet >= EFFECTIVE_STACK_BB or new_total <= current_bet:
+                validation_errors.append(f"{position_to_string(position)} cannot raise to {record.amount:.2f} BB")
+                continue
             if new_total < min_total and new_total < EFFECTIVE_STACK_BB:
                 validation_errors.append(f"{position_to_string(position)} raise total must be at least {min_total:.2f} BB")
-            new_total = min(max(new_total, current_bet), EFFECTIVE_STACK_BB)
+                continue
             raise_increment = max(0.0, new_total - current_bet)
             contributions[position] = new_total
             current_bet = new_total
             if raise_increment > 0.0:
                 last_raise_increment = raise_increment
             acted = {position}
+            last_actor = position
 
     pot_size = sum(contributions.values())
     call_amount = 0.0 if hero_position in folded else max(0.0, current_bet - contributions[hero_position])
@@ -86,7 +110,7 @@ def derive_preflop_state(
         if position != hero_position
     ])
     is_closed = _betting_is_closed(folded, contributions, current_bet, acted)
-    next_to_act = _next_to_act(folded, contributions, current_bet, acted)
+    next_to_act = _next_to_act(folded, contributions, current_bet, acted, last_actor)
     legal_actions = _legal_actions(next_to_act, folded, contributions, current_bet)
     min_raise_total = _min_raise_total(current_bet, last_raise_increment)
 
@@ -150,7 +174,10 @@ def _betting_is_closed(
     if len(active) <= 1:
         return True
     return all(
-        contributions[position] >= current_bet and position in acted
+        (
+            contributions[position] >= EFFECTIVE_STACK_BB
+            or (contributions[position] >= current_bet and position in acted)
+        )
         for position in active
     )
 
@@ -160,11 +187,16 @@ def _next_to_act(
     contributions: dict[Position, float],
     current_bet: float,
     acted: set[Position],
+    after_position: Position | None = None,
 ) -> Position | None:
     if _betting_is_closed(folded, contributions, current_bet, acted):
         return None
-    for position in POSITIONS:
+    start_index = 0 if after_position is None else (POSITIONS.index(after_position) + 1) % len(POSITIONS)
+    for offset in range(len(POSITIONS)):
+        position = POSITIONS[(start_index + offset) % len(POSITIONS)]
         if position in folded:
+            continue
+        if contributions[position] >= EFFECTIVE_STACK_BB:
             continue
         if contributions[position] < current_bet or position not in acted:
             return position
@@ -180,9 +212,10 @@ def _legal_actions(
     if position is None or position in folded:
         return ()
     to_call = max(0.0, current_bet - contributions[position])
+    can_raise = current_bet < EFFECTIVE_STACK_BB and contributions[position] < EFFECTIVE_STACK_BB
     if to_call > 0.0:
-        return (Action.FOLD, Action.CALL, Action.RAISE)
-    return (Action.CHECK, Action.RAISE)
+        return (Action.FOLD, Action.CALL, Action.RAISE) if can_raise else (Action.FOLD, Action.CALL)
+    return (Action.CHECK, Action.RAISE) if can_raise else (Action.CHECK,)
 
 
 def _min_raise_total(current_bet: float, last_raise_increment: float) -> float:

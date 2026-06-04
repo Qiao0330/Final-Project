@@ -82,8 +82,10 @@ def _read_action_record(position: Position) -> PlayerAction:
         4: Action.CHECK,
     }[choice]
     amount = 0.0
-    if action in (Action.CALL, Action.RAISE):
-        amount = _read_float_min("Amount added in BB: ", 0.0)
+    if action == Action.CALL:
+        amount = _read_float_min("Call amount added in BB (0 to derive automatically): ", 0.0)
+    elif action == Action.RAISE:
+        amount = _read_float_min("Raise-to total in BB: ", 0.01)
     return PlayerAction(position=position, action=action, amount=amount)
 
 
@@ -99,7 +101,7 @@ def _read_action_history() -> tuple[PlayerAction, ...]:
 
 def _read_candidate_raise_amounts() -> tuple[float, ...]:
     print("\nCandidate raise sizes")
-    print("Enter the amount Hero would invest for each raise option.")
+    print("Enter each raise-to total, not the additional amount invested.")
     print("Use 0 to skip raise analysis for this spot.")
     count = _read_int_range("Number of raise sizes to compare (0-5): ", 0, 5)
     values: list[float] = []
@@ -139,7 +141,10 @@ def read_solver_input() -> SolverInput:
     hero_hand = _read_hole_cards()
     print("\nCurrent decision point")
     pot_size = _read_float_min("Current pot size in BB: ", 0.0)
-    call_amount = _read_float_min("Amount Hero must call in BB (0 if check is available): ", 0.0)
+    current_bet = _read_float_min("Current highest total bet in BB: ", 0.0)
+    hero_contribution = _read_float_min("Hero amount already invested in BB: ", 0.0)
+    call_amount = max(0.0, current_bet - hero_contribution)
+    print(f"Amount Hero must call: {call_amount:.2f} BB")
     candidate_raise_amounts = _read_candidate_raise_amounts()
     active_opponent_count = _read_int_range("Active opponent count (0-5): ", 0, 5)
     table_actions = _read_action_history()
@@ -156,6 +161,8 @@ def read_solver_input() -> SolverInput:
         table_actions=table_actions,
         active_opponent_count=active_opponent_count,
         candidate_raise_amounts=candidate_raise_amounts,
+        hero_contribution=hero_contribution,
+        current_bet=current_bet,
     )
 
 
@@ -212,8 +219,7 @@ def print_input_guide() -> None:
     print("Invalid examples: 10h, Kx, ZZ, duplicated cards like Ah Ah")
     print()
     print("In a new analysis, enter Hero position and cards first.")
-    print("Then enter the current pot, call amount, candidate raise sizes, active opponents, and prior actions.")
-    print("Use call amount 0 when Hero can check. The solver will compare check against raise options.")
+    print("Then enter the current pot, current highest bet, Hero contribution, raise-to totals, active opponents, and prior actions.")
     print_opening_ranges()
 
 

@@ -117,19 +117,24 @@ function renderHistory() {
 function buildStudyPayload() {
   const studyPosition = currentStudyPosition();
   setStudyPosition(studyPosition);
+  const autoState = el("auto-state").checked;
+  const candidateRaiseAmounts = el("raise-sizes").value
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isFinite(value) && value > 0);
   return {
     hero_position: studyPosition,
     hero_hand: el("hero-hand").value,
-    street: "preflop",
-    board_cards: "",
+    street: el("street").value,
+    board_cards: el("board-cards").value,
     pot_bb: Number(el("pot-bb").value),
     call_amount_bb: Number(el("call-bb").value),
-    raise_amount_bb: 0,
-    candidate_raise_amounts: [],
+    raise_amount_bb: autoState ? 0 : Number(el("raise-bb").value),
+    candidate_raise_amounts: autoState ? [] : candidateRaiseAmounts,
     simulations: Number(el("simulations").value),
     action_history: state.history,
     active_opponent_count: Number(el("opponents").value),
-    auto_state: true,
+    auto_state: autoState,
   };
 }
 
@@ -138,7 +143,7 @@ async function analyze() {
   try {
     const data = await postJson("/api/study", buildStudyPayload());
     state.studyData = data;
-    setStudyPosition(data.hero_position || data.betting_state?.next_to_act || currentStudyPosition());
+    setStudyPosition(data.betting_state?.next_to_act || data.hero_position || currentStudyPosition());
     state.selectedHand = data.range_grid.find((item) => item.is_selected) || data.range_grid[0];
     renderStudy(data);
     el("status-line").textContent = `Loaded ${data.range_grid.length} hand classes with ${data.range_simulations} range sims each against ${data.opponent_ranges.length} opponent ranges.`;

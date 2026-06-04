@@ -10,8 +10,8 @@ UTG, HJ, CO, BTN, SB, and BB. The console analysis flow now asks for Hero's
 position and hole cards first, then asks for the current decision point:
 
 - current pot size
-- amount Hero must call, or 0 if checking is available
-- candidate raise sizes to compare
+- current highest total bet and Hero's existing contribution
+- raise-to totals to compare
 - active opponent count
 - optional prior action history
 - simulation count
@@ -53,11 +53,27 @@ It also includes a browser UI served by `web_app.py`. The UI provides:
 
 The project is now Python-first. The previous C source files were removed.
 
+## Model Scope
+
+This project is GTO-inspired, not a full GTO solver. It uses calibrated
+position-based ranges, action-dependent opponent range filtering, blocker and
+playability heuristics, Monte Carlo equity estimation, and simplified chip-EV
+comparisons.
+
+It does not currently solve a complete betting game tree with CFR, regret
+matching, best-response evaluation, or exploitability measurement.
+
+`PlayerAction.amount` uses these conventions:
+
+- `raise`: total amount invested after raising, such as `8.0` for "raise to 8 BB"
+- `call`: amount added by the caller, or `0` when the state engine should derive it
+
 ## Files
 
 - `common.py`: shared enums and data classes
 - `card.py`: card parsing and card utilities
 - `poker_eval.py`: seven-card poker hand evaluation
+- `betting_state.py`: legal preflop action order, blinds, pot, calls, raises, and round closure
 - `range_model.py`: hand class, position range, and fold probability model
 - `equity.py`: Monte Carlo preflop equity simulation
 - `range_equity.py`: range-aware opponent sampling and equity estimation
@@ -67,6 +83,8 @@ The project is now Python-first. The previous C source files were removed.
 - `ui.py`: console user interface
 - `study_adapter.py`: Study Mode dict API for UI integration
 - `trainer_adapter.py`: Trainer Mode dict API for UI integration
+- `trainer.py`: preflop training scenario generation and EV comparison
+- `flop_trainer.py`: heuristic flop texture training module
 - `adapter_utils.py`: shared adapter parsing and formatting helpers
 - `web_app.py`: local browser UI server
 - `web_static/`: HTML, CSS, and JavaScript for the browser UI

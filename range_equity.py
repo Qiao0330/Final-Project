@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from random import choices, sample
+from random import Random
 
 from card import BOARD_SIZE, FULL_DECK
 from common import TABLE_POSITIONS, Action, Card, HoleCards, PlayerAction, Position
@@ -61,6 +61,20 @@ def infer_opponent_ranges(
     return tuple(ranges)
 
 
+def engaged_opponent_ranges(
+    opponent_ranges: tuple[OpponentRange, ...],
+    action_history: tuple[PlayerAction, ...],
+) -> tuple[OpponentRange, ...]:
+    latest_actions: dict[Position, Action] = {}
+    for record in action_history:
+        latest_actions[record.position] = record.action
+    return tuple(
+        opponent_range
+        for opponent_range in opponent_ranges
+        if latest_actions.get(opponent_range.position) in (Action.CALL, Action.RAISE, Action.CHECK)
+    )
+
+
 def estimate_equity_against_ranges(
     hero_hand: HoleCards,
     opponent_ranges: tuple[OpponentRange, ...],
@@ -72,15 +86,17 @@ def estimate_equity_against_ranges(
 
     wins = 0
     ties = 0
+    equity_sum = 0.0
     simulation_count = max(1, simulations)
     hero_cards = {hero_hand.card1, hero_hand.card2}
     known_board = tuple(board_cards[:BOARD_SIZE])
+    rng = Random(_simulation_seed(hero_hand, opponent_ranges, known_board, simulation_count))
 
     for _ in range(simulation_count):
         opponent_hands: list[HoleCards] = []
         known_cards = {*hero_cards, *known_board}
         for opponent_range in opponent_ranges:
-            candidate = _draw_candidate(opponent_range, known_cards)
+            candidate = _draw_candidate(opponent_range, known_cards, rng)
             if candidate is None:
                 continue
             opponent_hands.append(candidate.hand)
@@ -88,10 +104,10 @@ def estimate_equity_against_ranges(
             known_cards.add(candidate.hand.card2)
 
         deck = [card for card in FULL_DECK if card not in known_cards]
-        board = (*known_board, *sample(deck, max(0, BOARD_SIZE - len(known_board))))
+        board = (*known_board, *rng.sample(deck, max(0, BOARD_SIZE - len(known_board))))
         hero_value = evaluate_7cards((hero_hand.card1, hero_hand.card2, *board))
         better = False
-        equal = False
+        equal_opponents = 0
 
         for opponent_hand in opponent_hands:
             opponent_value = evaluate_7cards((opponent_hand.card1, opponent_hand.card2, *board))
@@ -100,16 +116,18 @@ def estimate_equity_against_ranges(
                 better = True
                 break
             if comparison == 0:
-                equal = True
+                equal_opponents += 1
 
         if better:
             continue
-        if equal:
+        if equal_opponents:
             ties += 1
+            equity_sum += 1.0 / (equal_opponents + 1)
         else:
             wins += 1
+            equity_sum += 1.0
 
-    return (wins + 0.5 * ties) / simulation_count
+    return equity_sum / simulation_count
 
 
 def range_summary_to_dict(opponent_ranges: tuple[OpponentRange, ...]) -> list[dict]:
@@ -124,6 +142,72 @@ def range_summary_to_dict(opponent_ranges: tuple[OpponentRange, ...]) -> list[di
         }
         for opponent_range in opponent_ranges
     ]
+
+
+def continuing_ranges_for_raise(
+    opponent_ranges: tuple[OpponentRange, ...],
+    raise_total: float,
+    current_bet: float,
+) -> tuple[tuple[OpponentRange, ...], float]:
+    if not opponent_ranges:
+        return (), 1.0
+
+    strategy = load_strategy_profile()
+    thresholds = strategy.get("raise_size_thresholds", {})
+    if raise_total >= float(thresholds.get("all_in_total_bb", 99.0)):
+        profile_key = "all_in"
+    elif raise_total >= float(thresholds.get("large_raise_total_bb", 12.0)) or (
+        current_bet > 0.0 and raise_total / current_bet >= 4.0
+    ):
+        profile_key = "large_raise"
+    else:
+        profile_key = "raise"
+
+    continuing: list[OpponentRange] = []
+    all_fold_probability = 1.0
+    for opponent_range in opponent_ranges:
+        continue_fraction = _strategy_fraction(strategy, opponent_range.position, profile_key)
+        candidates = _top_weighted_candidates(list(opponent_range.candidates), continue_fraction)
+        continue_weight = sum(candidate.weight for candidate in candidates)
+        fold_probability = (
+            1.0 - continue_weight / opponent_range.total_weight
+            if opponent_range.total_weight > 0.0
+            else 1.0
+        )
+        all_fold_probability *= max(0.0, min(1.0, fold_probability))
+        continuing.append(
+            OpponentRange(
+                position=opponent_range.position,
+                candidates=tuple(candidates),
+                total_weight=continue_weight,
+                source=f"continue versus raise to {raise_total:.1f} BB",
+                profile_key=profile_key,
+                continue_fraction=continue_fraction,
+            )
+        )
+    return tuple(continuing), all_fold_probability
+
+
+def single_caller_range(
+    opponent_ranges: tuple[OpponentRange, ...],
+) -> tuple[OpponentRange, ...]:
+    if not opponent_ranges:
+        return ()
+    candidates = tuple(
+        candidate
+        for opponent_range in opponent_ranges
+        for candidate in opponent_range.candidates
+    )
+    return (
+        OpponentRange(
+            position=opponent_ranges[0].position,
+            candidates=candidates,
+            total_weight=sum(candidate.weight for candidate in candidates),
+            source="combined conditional caller range",
+            profile_key="combined",
+            continue_fraction=1.0,
+        ),
+    )
 
 
 def _range_profile(position: Position, action_history: tuple[PlayerAction, ...]) -> tuple[str, str, float]:
@@ -200,11 +284,37 @@ def _top_weighted_candidates(candidates: list[RangeCandidate], continue_fraction
     return selected or candidates[:1]
 
 
-def _draw_candidate(opponent_range: OpponentRange, known_cards: set[Card]) -> RangeCandidate | None:
+def _simulation_seed(
+    hero_hand: HoleCards,
+    opponent_ranges: tuple[OpponentRange, ...],
+    board_cards: tuple[Card, ...],
+    simulations: int,
+) -> int:
+    values = [
+        int(hero_hand.card1.rank), int(hero_hand.card1.suit),
+        int(hero_hand.card2.rank), int(hero_hand.card2.suit),
+        simulations,
+    ]
+    for card in board_cards:
+        values.extend((int(card.rank), int(card.suit)))
+    for opponent_range in opponent_ranges:
+        values.extend((int(opponent_range.position), len(opponent_range.candidates)))
+
+    seed = 0
+    for value in values:
+        seed = (seed * 131 + value) & 0xFFFFFFFF
+    return seed
+
+
+def _draw_candidate(
+    opponent_range: OpponentRange,
+    known_cards: set[Card],
+    rng: Random,
+) -> RangeCandidate | None:
     available = [
         candidate for candidate in opponent_range.candidates
         if candidate.hand.card1 not in known_cards and candidate.hand.card2 not in known_cards
     ]
     if not available:
         return None
-    return choices(available, weights=[candidate.weight for candidate in available], k=1)[0]
+    return rng.choices(available, weights=[candidate.weight for candidate in available], k=1)[0]

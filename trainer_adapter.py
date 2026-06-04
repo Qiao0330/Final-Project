@@ -30,7 +30,7 @@ def get_trainer_question(settings: dict | None = None) -> dict:
     _QUESTIONS[question_id] = (scenario, simulations)
 
     available_actions = _available_action_labels(scenario.options)
-    first_raise = next((option.raise_amount for option in scenario.options if option.action == Action.RAISE), 0.0)
+    first_raise = next((option.total_bet for option in scenario.options if option.action == Action.RAISE), 0.0)
 
     return {
         "question_id": question_id,

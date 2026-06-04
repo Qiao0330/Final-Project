@@ -22,6 +22,8 @@ class SolverInput:
     active_opponent_count: int | None = None
     candidate_raise_amounts: tuple[float, ...] = ()
     board_cards: tuple[Card, ...] = ()
+    hero_contribution: float = 0.0
+    current_bet: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,7 @@ class SolverActionEV:
     action: Action
     amount: float
     ev: float
+    fold_probability: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -64,17 +67,91 @@ def _candidate_raise_amounts(solver_input: SolverInput) -> tuple[float, ...]:
     return tuple(clean_values)
 
 
+def _current_bet_and_hero_contribution(
+    solver_input: SolverInput,
+    action_records: tuple[PlayerAction, ...],
+) -> tuple[float, float]:
+    current_bet = max(
+        1.0,
+        solver_input.current_bet,
+        *(record.amount for record in action_records if record.action == Action.RAISE),
+    )
+    if solver_input.hero_contribution > 0.0:
+        return current_bet, solver_input.hero_contribution
+
+    hero_raises = [
+        record.amount for record in action_records
+        if record.position == solver_input.hero_position and record.action == Action.RAISE
+    ]
+    if hero_raises:
+        return current_bet, hero_raises[-1]
+    if solver_input.hero_position == Position.SB:
+        return current_bet, 0.5
+    if solver_input.hero_position == Position.BB:
+        return current_bet, 1.0
+    return current_bet, 0.0
+
+
+def _active_opponent_positions(
+    action_records: tuple[PlayerAction, ...],
+    hero_position: Position,
+) -> set[Position]:
+    latest_actions: dict[Position, Action] = {}
+    for record in action_records:
+        if record.position != hero_position:
+            latest_actions[record.position] = record.action
+    return {
+        position for position, action in latest_actions.items()
+        if action in (Action.CALL, Action.RAISE, Action.CHECK)
+    }
+
+
+def _actions_after_last_hero_action(
+    action_records: tuple[PlayerAction, ...],
+    hero_position: Position,
+) -> tuple[PlayerAction, ...]:
+    last_hero_action_index = -1
+    for index, record in enumerate(action_records):
+        if record.position == hero_position:
+            last_hero_action_index = index
+    if last_hero_action_index < 0:
+        return ()
+    return action_records[last_hero_action_index + 1:]
+
+
+def _raise_fold_probability(
+    solver_input: SolverInput,
+    actions_after_hero: tuple[PlayerAction, ...],
+    raise_total: float,
+) -> float:
+    non_hero_actions = [
+        record for record in actions_after_hero
+        if record.position != solver_input.hero_position
+    ]
+    if non_hero_actions:
+        latest_actions: dict[Position, Action] = {}
+        for record in non_hero_actions:
+            latest_actions[record.position] = record.action
+        return 1.0 if latest_actions and all(
+            action == Action.FOLD for action in latest_actions.values()
+        ) else 0.0
+    return estimate_open_fold_probability(
+        hero_position=solver_input.hero_position,
+        hero_hand=solver_input.hero_hand,
+        pot_size=solver_input.pot_size,
+        raise_amount=raise_total,
+    )
+
+
 def solve_preflop_decision(solver_input: SolverInput) -> SolverResult:
     action_records = solver_input.table_actions or solver_input.prior_actions
     raise_amounts = _candidate_raise_amounts(solver_input)
-    fold_model_raise_amount = max(raise_amounts) if raise_amounts else solver_input.raise_amount
+    current_bet, hero_contribution = _current_bet_and_hero_contribution(solver_input, action_records)
+    raise_amounts = tuple(amount for amount in raise_amounts if amount > current_bet)
     if solver_input.active_opponent_count is not None:
         opponent_count = max(0, solver_input.active_opponent_count)
     else:
-        opponent_count = sum(
-            1 for record in action_records
-            if record.action in (Action.CALL, Action.RAISE) and record.position != solver_input.hero_position
-        )
+        opponent_count = len(_active_opponent_positions(action_records, solver_input.hero_position))
     equity_result = estimate_preflop_equity(
         EquityInput(
             hero_hand=solver_input.hero_hand,
@@ -87,34 +164,7 @@ def solve_preflop_decision(solver_input: SolverInput) -> SolverResult:
     hand_class = get_hand_class(solver_input.hero_hand)
     range_frequency = get_preflop_frequency(solver_input.hero_position, hand_class)
 
-    last_hero_action_index = -1
-    for index, record in enumerate(action_records):
-        if record.position == solver_input.hero_position:
-            last_hero_action_index = index
-
-    actions_after_hero = (
-        action_records[last_hero_action_index + 1:]
-        if last_hero_action_index >= 0
-        else ()
-    )
-    non_hero_actions_after_hero = [
-        record for record in actions_after_hero
-        if record.position != solver_input.hero_position
-    ]
-    if non_hero_actions_after_hero:
-        folds_after_hero = sum(
-            1 for record in non_hero_actions_after_hero
-            if record.action == Action.FOLD
-        )
-        fold_probability = folds_after_hero / len(non_hero_actions_after_hero)
-    else:
-        fold_probability = estimate_open_fold_probability(
-            hero_position=solver_input.hero_position,
-            hero_hand=solver_input.hero_hand,
-            pot_size=solver_input.pot_size,
-            raise_amount=fold_model_raise_amount,
-        )
-    fold_probability = _clamp_probability(fold_probability)
+    actions_after_hero = _actions_after_last_hero_action(action_records, solver_input.hero_position)
 
     future_contribution = max(0.0, solver_input.future_contribution)
     final_pot_call = solver_input.pot_size + solver_input.call_amount + future_contribution
@@ -130,18 +180,35 @@ def solve_preflop_decision(solver_input: SolverInput) -> SolverResult:
         action_evs.append(SolverActionEV(Action.CHECK, 0.0, ev_check))
 
     raise_results: list[SolverActionEV] = []
-    for raise_amount in raise_amounts:
-        final_pot_raise = solver_input.pot_size + raise_amount + future_contribution
+    for raise_total in raise_amounts:
+        fold_probability = _clamp_probability(
+            _raise_fold_probability(solver_input, actions_after_hero, raise_total)
+        )
+        hero_investment = max(0.0, raise_total - hero_contribution)
+        opponent_call_amount = max(0.0, raise_total - current_bet)
+        final_pot_raise = (
+            solver_input.pot_size
+            + hero_investment
+            + (future_contribution if future_contribution > 0.0 else opponent_call_amount)
+        )
         ev = (
             fold_probability * solver_input.pot_size
-            + (1.0 - fold_probability) * (equity * final_pot_raise - raise_amount)
+            + (1.0 - fold_probability) * (equity * final_pot_raise - hero_investment)
         )
-        raise_results.append(SolverActionEV(Action.RAISE, raise_amount, ev))
+        raise_results.append(SolverActionEV(Action.RAISE, raise_total, ev, fold_probability))
         action_evs.append(raise_results[-1])
 
     best_raise = max(raise_results, key=lambda item: item.ev) if raise_results else None
     ev_raise = best_raise.ev if best_raise is not None else 0.0
     best_raise_amount = best_raise.amount if best_raise is not None else 0.0
+    if best_raise is not None:
+        fold_probability = best_raise.fold_probability
+    elif solver_input.raise_amount > 0.0:
+        fold_probability = _clamp_probability(
+            _raise_fold_probability(solver_input, actions_after_hero, solver_input.raise_amount)
+        )
+    else:
+        fold_probability = 0.0
 
     best_action = max(action_evs, key=lambda item: item.ev)
     recommendation = best_action.action

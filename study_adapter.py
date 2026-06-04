@@ -18,9 +18,12 @@ from betting_state import betting_state_to_dict, derive_preflop_state
 from common import Action, Card, HoleCards, Position, Rank, Suit
 from equity import EquityInput, estimate_preflop_equity
 from range_equity import (
+    continuing_ranges_for_raise,
+    engaged_opponent_ranges,
     estimate_equity_against_ranges,
     infer_opponent_ranges,
     range_summary_to_dict,
+    single_caller_range,
 )
 from range_model import (
     all_preflop_hand_classes,
@@ -29,7 +32,6 @@ from range_model import (
     hand_strength_score,
     position_to_string,
 )
-from solver import SolverInput, action_to_string, solve_preflop_decision
 
 
 @dataclass(frozen=True)
@@ -69,29 +71,11 @@ def get_study_view_data(request: dict) -> dict:
     opponent_count = int(active_opponent_count) if active_opponent_count is not None else 0
     range_simulations = _range_simulations(simulations, request)
     opponent_ranges = infer_opponent_ranges(hero_position, hero_hand, action_history)
+    engaged_ranges = engaged_opponent_ranges(opponent_ranges, action_history)
     candidate_raise_amounts = _candidate_raise_amounts(request, raise_amount_bb)
     if not candidate_raise_amounts:
         candidate_raise_amounts = _auto_raise_amounts(hero_position, action_history, derived_state.current_bet)
         raise_amount_bb = candidate_raise_amounts[0] if candidate_raise_amounts else 0.0
-
-    result = solve_preflop_decision(
-        SolverInput(
-            hero_position=hero_position,
-            hero_hand=hero_hand,
-            pot_size=pot_bb,
-            call_amount=call_amount_bb,
-            raise_amount=raise_amount_bb,
-            simulations=simulations,
-            table_actions=action_history,
-            active_opponent_count=(
-                opponent_count
-                if active_opponent_count is not None
-                else None
-            ),
-            candidate_raise_amounts=candidate_raise_amounts,
-            board_cards=board_cards,
-        )
-    )
 
     range_grid = _range_grid(
         hero_position=hero_position,
@@ -103,8 +87,11 @@ def get_study_view_data(request: dict) -> dict:
         board_cards=board_cards,
         action_history=action_history,
         opponent_ranges=opponent_ranges,
+        engaged_ranges=engaged_ranges,
         fallback_opponent_count=opponent_count,
         simulations=range_simulations,
+        hero_contribution=derived_state.contributions.get(hero_position, 0.0),
+        current_bet=derived_state.current_bet,
     )
     selected_grid_item = next((item for item in range_grid if item["is_selected"]), range_grid[0])
     actions = _actions_from_grid_item(selected_grid_item)
@@ -113,6 +100,15 @@ def get_study_view_data(request: dict) -> dict:
         for item in actions
     }
     recommended_label = selected_grid_item["recommended"]
+    selected_evs = selected_grid_item["evs"]
+    node_explanation = (
+        "Betting round is closed; the displayed strategy is retained for review."
+        if derived_state.is_closed and auto_state
+        else (
+            f"Recommended {recommended_label.lower()} because it has the highest "
+            f"estimated EV for {selected_grid_item['hand']} in the displayed strategy model."
+        )
+    )
     pot_odds = (
         call_amount_bb / (pot_bb + call_amount_bb) * 100.0
         if call_amount_bb > 0.0 and pot_bb + call_amount_bb > 0.0
@@ -154,19 +150,17 @@ def get_study_view_data(request: dict) -> dict:
             }
         ],
         "metrics": {
-            "equity": result.equity * 100.0,
-            "win_rate": result.equity_result.win_rate * 100.0,
-            "tie_rate": result.equity_result.tie_rate * 100.0,
-            "loss_rate": result.equity_result.loss_rate * 100.0,
-            "ev_fold": result.ev_fold,
-            "ev_check": result.ev_check,
-            "ev_call": result.ev_call,
-            "ev_raise": result.ev_raise,
+            "equity": selected_grid_item["equity"],
+            "win_rate": None,
+            "tie_rate": None,
+            "loss_rate": None,
+            "ev_fold": selected_evs.get("Fold", 0.0),
+            "ev_check": selected_evs.get("Check", 0.0),
+            "ev_call": selected_evs.get("Call", 0.0),
+            "ev_raise": selected_evs.get("Raise", 0.0),
+            "equity_source": "range-aware Monte Carlo",
         },
-        "explanation": (
-            f"Recommended {action_to_string(result.recommendation)}. "
-            f"{result.explanation}"
-        ),
+        "explanation": node_explanation,
     }
 
 
@@ -218,8 +212,11 @@ def _range_grid(
     board_cards: tuple[Card, ...],
     action_history,
     opponent_ranges,
+    engaged_ranges,
     fallback_opponent_count: int,
     simulations: int,
+    hero_contribution: float,
+    current_bet: float,
 ) -> list[dict]:
     hero_class = get_hand_class(hero_hand).name
     dead_cards = set(board_cards)
@@ -229,10 +226,10 @@ def _range_grid(
         col = index % 13
         frequency = get_preflop_frequency(hero_position, hand_class)
         representative = _representative_hand(hand_class, dead_cards)
-        if opponent_ranges:
+        if engaged_ranges:
             equity = estimate_equity_against_ranges(
                 representative,
-                opponent_ranges,
+                engaged_ranges,
                 simulations,
                 board_cards,
             )
@@ -245,24 +242,28 @@ def _range_grid(
                     board_cards=board_cards,
                 )
             ).equity
-        if call_amount_bb > 0.0:
-            action_values, evs, raise_options = _preflop_action_profile(
-                hero_position,
-                hand_class,
-                action_history,
-                call_amount_bb,
-                pot_bb,
-                candidate_raise_amounts or (raise_amount_bb,),
-            )
-        else:
-            action_values, evs, raise_options = _preflop_action_profile(
-                hero_position,
-                hand_class,
-                action_history,
-                call_amount_bb,
-                pot_bb,
-                candidate_raise_amounts or (raise_amount_bb,),
-            )
+        raise_amounts = candidate_raise_amounts or (raise_amount_bb,)
+        action_values, _, _ = _preflop_action_profile(
+            hero_position,
+            hand_class,
+            action_history,
+            call_amount_bb,
+            pot_bb,
+            raise_amounts,
+        )
+        evs, raise_options = _action_evs_from_equity(
+            action_values,
+            equity,
+            representative,
+            opponent_ranges,
+            board_cards,
+            simulations,
+            pot_bb,
+            call_amount_bb,
+            raise_amounts,
+            hero_contribution,
+            current_bet,
+        )
         recommended = _recommended_action(action_values, evs)
         items.append(
             {
@@ -285,12 +286,62 @@ def _range_grid(
     return items
 
 
-def _raise_ev(strength_factor: float, pot_bb: float, raise_amount_bb: float) -> float:
-    if raise_amount_bb <= 0.0:
-        return -999.0
-    fold_bonus = pot_bb * (0.15 + strength_factor * 0.35)
-    called_ev = strength_factor * (pot_bb + raise_amount_bb) - raise_amount_bb
-    return fold_bonus + called_ev * (0.65 + strength_factor * 0.20)
+def _action_evs_from_equity(
+    actions: dict[str, float],
+    equity: float,
+    hero_hand: HoleCards,
+    opponent_ranges,
+    board_cards: tuple[Card, ...],
+    simulations: int,
+    pot_bb: float,
+    call_amount_bb: float,
+    raise_amounts: tuple[float, ...],
+    hero_contribution: float,
+    current_bet: float,
+) -> tuple[dict[str, float], list[dict]]:
+    evs: dict[str, float] = {}
+    if "Fold" in actions:
+        evs["Fold"] = 0.0
+    if "Check" in actions:
+        evs["Check"] = equity * pot_bb
+    if "Call" in actions:
+        call_frequency = actions.get("Call", 0.0) / 100.0
+        evs["Call"] = (
+            equity * (pot_bb + call_amount_bb)
+            - call_amount_bb
+            - (1.0 - call_frequency) * call_amount_bb * 0.50
+        )
+
+    raise_evs: dict[str, float] = {}
+    for raise_total in raise_amounts:
+        if raise_total <= current_bet:
+            continue
+        continuing_ranges, fold_probability = continuing_ranges_for_raise(
+            opponent_ranges,
+            raise_total,
+            current_bet,
+        )
+        called_equity = estimate_equity_against_ranges(
+            hero_hand,
+            single_caller_range(continuing_ranges),
+            simulations,
+            board_cards,
+        )
+        hero_investment = max(0.0, raise_total - hero_contribution)
+        caller_investment = max(0.0, raise_total - current_bet)
+        final_pot = pot_bb + hero_investment + caller_investment
+        raw_raise_ev = (
+            fold_probability * pot_bb
+            + (1.0 - fold_probability) * (called_equity * final_pot - hero_investment)
+        )
+        raise_frequency = actions.get("Raise", 0.0) / 100.0
+        raise_evs[_raise_label(raise_total)] = (
+            raw_raise_ev
+            - (1.0 - raise_frequency) * hero_investment * 0.55
+        )
+    if "Raise" in actions:
+        evs["Raise"] = max(raise_evs.values(), default=-999.0)
+    return evs, _raise_options(raise_evs, actions.get("Raise", 0.0))
 
 
 def _preflop_action_profile(
@@ -579,14 +630,8 @@ def _hand_combo_count(hand_class) -> int:
 
 
 def _recommended_action(actions: dict[str, float], evs: dict[str, float]) -> str:
-    available = {
-        name: frequency
-        for name, frequency in actions.items()
-        if frequency > 0.0
-    }
-    if not available:
-        return max(evs, key=lambda name: evs[name])
-    return max(available, key=lambda name: (available[name], evs.get(name, 0.0)))
+    legal_names = [name for name in actions if name in evs]
+    return max(legal_names, key=lambda name: evs[name]) if legal_names else max(evs, key=evs.get)
 
 
 def _open_raise_threshold(position) -> int:
@@ -717,14 +762,6 @@ def _raise_options_from_base_ev(
     return _raise_options(raise_evs, total_raise_frequency)
 
 
-def _raise_option_evs(equity: float, pot_bb: float, raise_amounts: tuple[float, ...]) -> dict[str, float]:
-    return {
-        _raise_label(amount): _raise_ev(equity, pot_bb, amount)
-        for amount in raise_amounts
-        if amount > 0.0
-    }
-
-
 def _raise_options(raise_evs: dict[str, float], total_raise_frequency: float) -> list[dict]:
     frequencies = mixed_frequencies_from_named_evs(raise_evs)
     best_label = _best_raise_label(raise_evs)
@@ -753,7 +790,7 @@ def _raise_label(amount: float) -> str:
 def _range_simulations(simulations: int, request: dict) -> int:
     explicit = request.get("range_simulations")
     if explicit is not None:
-        return max(1, min(1000, int(explicit)))
+        return max(20, min(1000, int(explicit)))
     return max(20, min(120, simulations // 20 if simulations > 0 else 20))
 
 

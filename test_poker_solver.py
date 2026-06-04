@@ -14,8 +14,10 @@ from solver import SolverInput, solve_preflop_decision
 from strategy_profile import normalize_strategy_profile
 from adapter_utils import mixed_frequencies_from_named_evs, parse_board_text
 from equity import EquityInput, estimate_preflop_equity
+from range_equity import OpponentRange, RangeCandidate, estimate_equity_against_ranges
 from study_adapter import get_study_view_data
 from trainer_adapter import get_trainer_question, grade_trainer_answer
+from trainer import generate_random_scenario
 
 
 def _must_parse(text):
@@ -55,6 +57,26 @@ def test_board_parsing_and_equity():
         assert "overlap" in str(exc)
     else:
         assert False, "expected overlapping board card to fail"
+
+
+def test_multiway_tie_equity_uses_split_pot_share():
+    hand = parse_hole_cards("2c", "3d")
+    opponent_one = parse_hole_cards("4c", "5d")
+    opponent_two = parse_hole_cards("6c", "7d")
+    assert hand is not None and opponent_one is not None and opponent_two is not None
+    board = tuple(_must_parse(card) for card in ("Ah", "Kh", "Qh", "Jh", "Th"))
+
+    random_result = estimate_preflop_equity(
+        EquityInput(hand, opponent_count=2, simulations=10, board_cards=board)
+    )
+    assert abs(random_result.equity - (1.0 / 3.0)) < 1e-9
+
+    ranges = (
+        OpponentRange(Position.UTG, (RangeCandidate(opponent_one, 1.0, 1.0),), 1.0, "test", "test", 1.0),
+        OpponentRange(Position.HJ, (RangeCandidate(opponent_two, 1.0, 1.0),), 1.0, "test", "test", 1.0),
+    )
+    range_equity = estimate_equity_against_ranges(hand, ranges, 10, board)
+    assert abs(range_equity - (1.0 / 3.0)) < 1e-9
 
 
 def test_hand_evaluator():
@@ -214,7 +236,7 @@ def test_preflop_betting_state_derivation():
             PlayerAction(Position.HJ, Action.RAISE, 3.0),
         ),
     )
-    assert invalid_raise.current_bet == 3.0
+    assert invalid_raise.current_bet == 2.5
     assert invalid_raise.validation_errors
 
     all_in = derive_preflop_state(
@@ -240,6 +262,29 @@ def test_preflop_betting_state_derivation():
     assert closed.is_closed
     assert closed.next_to_act is None
     assert closed.legal_actions == ()
+
+    out_of_turn = derive_preflop_state(
+        Position.BB,
+        (PlayerAction(Position.BTN, Action.FOLD, 0.0),),
+    )
+    assert out_of_turn.validation_errors
+    assert out_of_turn.next_to_act == Position.UTG
+
+    short_call = derive_preflop_state(
+        Position.BB,
+        (
+            PlayerAction(Position.UTG, Action.RAISE, 3.0),
+            PlayerAction(Position.HJ, Action.CALL, 1.0),
+        ),
+    )
+    assert short_call.validation_errors
+    assert short_call.contributions[Position.HJ] == 0.0
+
+    facing_all_in = derive_preflop_state(
+        Position.BB,
+        (PlayerAction(Position.UTG, Action.RAISE, 100.0),),
+    )
+    assert facing_all_in.legal_actions == (Action.FOLD, Action.CALL)
 
 
 def test_solver_counts_position_order_context():
@@ -297,7 +342,7 @@ def test_solver_counts_position_order_context():
         )
     )
     assert small_blind_calls.opponent_count == 1
-    assert small_blind_calls.fold_probability == 0.5
+    assert small_blind_calls.fold_probability == 0.0
 
     facing_cutoff_raise_and_small_blind_call = solve_preflop_decision(
         SolverInput(
@@ -324,6 +369,23 @@ def test_solver_counts_position_order_context():
         )
     )
     assert facing_cutoff_raise_and_small_blind_call.opponent_count == 2
+
+    repeated_opponent_action = solve_preflop_decision(
+        SolverInput(
+            hero_position=Position.BTN,
+            hero_hand=hand,
+            pot_size=12.0,
+            call_amount=0.0,
+            raise_amount=20.0,
+            simulations=10,
+            table_actions=(
+                PlayerAction(Position.UTG, Action.RAISE, 2.5),
+                PlayerAction(Position.BTN, Action.RAISE, 8.0),
+                PlayerAction(Position.UTG, Action.CALL, 5.5),
+            ),
+        )
+    )
+    assert repeated_opponent_action.opponent_count == 1
 
 
 def test_solver_check_and_raise_sizes():
@@ -359,6 +421,8 @@ def test_solver_check_and_raise_sizes():
     )
     assert len([action_ev for action_ev in multi_raise_spot.action_evs if action_ev.action == Action.RAISE]) == 2
     assert multi_raise_spot.best_raise_amount in (2.5, 6.0)
+    raise_evs = [action_ev for action_ev in multi_raise_spot.action_evs if action_ev.action == Action.RAISE]
+    assert raise_evs[0].fold_probability != raise_evs[1].fold_probability
 
 
 def test_mixed_frequencies_from_evs():
@@ -427,15 +491,22 @@ def test_single_open_context_model_matches_reference_targets_and_shapes():
     }
     results = {}
     for (hero_position, opener_position), expected in spots.items():
+        position_order = ("UTG", "HJ", "CO", "BTN", "SB", "BB")
+        action_history = [
+            {
+                "position": position,
+                "action": "raise" if position == opener_position else "fold",
+                "amount": 2.5 if position == opener_position else 0.0,
+            }
+            for position in position_order[:position_order.index(hero_position)]
+        ]
         data = get_study_view_data(
             {
                 "hero_position": hero_position,
                 "hero_hand": "AhAs",
                 "simulations": 5,
                 "range_simulations": 1,
-                "action_history": [
-                    {"position": opener_position, "action": "raise", "amount": 2.5},
-                ],
+                "action_history": action_history,
                 "auto_state": True,
             }
         )
@@ -529,7 +600,9 @@ def test_study_adapter_output_shape():
     assert closed_data["selected_hand"]["recommended"]
     assert len(closed_data["range_grid"]) == 169
     assert "metrics" in data
-    assert data["range_simulations"] == 5
+    assert data["metrics"]["equity"] == data["selected_hand"]["equity"]
+    assert data["selected_hand"]["recommended"].lower() in data["explanation"].lower()
+    assert data["range_simulations"] == 20
     assert data["opponent_ranges"]
     assert data["opponent_ranges"][0]["position"] == "UTG"
     assert data["opponent_ranges"][0]["source"] == "raise range"
@@ -646,10 +719,20 @@ def test_trainer_adapter_question_and_grade():
     assert 0 <= result["score"] <= 100
     assert result["actions"]
 
+    for _ in range(20):
+        assert generate_random_scenario("open_first").scenario_type == "open_first"
+
+    for mode in ("open_first", "facing_open", "facing_3bet", "facing_4bet"):
+        scenario = generate_random_scenario(mode)
+        state = derive_preflop_state(scenario.hero_position, scenario.table_actions)
+        assert not state.validation_errors
+        assert state.next_to_act == scenario.hero_position
+
 
 if __name__ == "__main__":
     test_card_parsing()
     test_board_parsing_and_equity()
+    test_multiway_tie_equity_uses_split_pot_share()
     test_hand_evaluator()
     test_hand_evaluator_edge_cases()
     test_range_model()
