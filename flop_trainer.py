@@ -5,7 +5,7 @@ from random import choice, sample
 
 from card import card_to_string
 from common import Action, Card, HoleCards, Position, Rank, Suit
-from range_model import position_to_string
+from range_model import get_hand_class, position_to_string
 
 
 STACK_BB = 100.0
@@ -16,6 +16,10 @@ POSITION_IP = "IP"
 POSITION_OOP = "OOP"
 PFA_CHECK = "check"
 PFA_BET = "bet"
+POT_SINGLE_RAISED = "Single-raised pot"
+POT_3BET = "3-bet pot"
+POT_4BET = "4-bet pot"
+POT_5BET = "5-bet pot"
 
 FULL_DECK = tuple(
     Card(rank=Rank(rank), suit=Suit(suit))
@@ -39,8 +43,12 @@ class FlopScenario:
     hero_role: str
     hero_position: str
     hero_table_position: Position
+    opponent_position: Position
     pfa_position: Position
     defender_position: Position
+    pot_type: str
+    preflop_summary: str
+    remaining_stack: float
     pfa_action: str
     pfa_bet_size: float
     options: tuple[FlopOption, ...]
@@ -76,30 +84,41 @@ class FlopTexture:
 
 
 def generate_random_flop_scenario() -> FlopScenario:
-    dealt = sample(FULL_DECK, 5)
-    hero_hand = HoleCards(dealt[0], dealt[1])
-    flop = (dealt[2], dealt[3], dealt[4])
-    pot_size = choice((5.5, 6.5, 8.5, 10.5, 13.5))
+    pot_type, pot_size, remaining_stack = _random_pot_setup()
     hero_role = choice((ROLE_AGGRESSOR, ROLE_DEFENDER))
+    hero_hand = _generate_hand_for_pot_type(pot_type, hero_role)
+    available_board = [card for card in FULL_DECK if card not in (hero_hand.card1, hero_hand.card2)]
+    flop_cards = sample(available_board, BOARD_SIZE)
+    flop = (flop_cards[0], flop_cards[1], flop_cards[2])
     pfa_position, defender_position = _random_position_pair()
     hero_table_position = pfa_position if hero_role == ROLE_AGGRESSOR else defender_position
     villain_position = defender_position if hero_role == ROLE_AGGRESSOR else pfa_position
+    preflop_summary = _make_preflop_summary(
+        pot_type,
+        hero_role,
+        hero_table_position,
+        villain_position,
+    )
     hero_position = POSITION_IP if _is_in_position(hero_table_position, villain_position) else POSITION_OOP
     pfa_bet_size = round(pot_size * choice((0.33, 0.50, 0.75)), 1)
 
     if hero_role == ROLE_AGGRESSOR:
         pfa_action = ""
-        options = _make_check_bet_options(pot_size, hero_position)
+        options = _make_check_bet_options(pot_size, hero_position, remaining_stack)
     else:
         if hero_position == POSITION_OOP:
-            pfa_action = ""
-            options = _make_check_bet_options(pot_size, hero_position)
+            pfa_action = choice((PFA_CHECK, PFA_BET))
+            options = (
+                ()
+                if pfa_action == PFA_CHECK
+                else _make_facing_bet_options(pfa_bet_size, pot_size, remaining_stack)
+            )
         else:
             pfa_action = choice((PFA_CHECK, PFA_BET))
             options = (
-                _make_check_bet_options(pot_size, hero_position)
+                _make_check_bet_options(pot_size, hero_position, remaining_stack)
                 if pfa_action == PFA_CHECK
-                else _make_facing_bet_options(pfa_bet_size, pot_size)
+                else _make_facing_bet_options(pfa_bet_size, pot_size, remaining_stack)
             )
 
     return FlopScenario(
@@ -109,8 +128,12 @@ def generate_random_flop_scenario() -> FlopScenario:
         hero_role=hero_role,
         hero_position=hero_position,
         hero_table_position=hero_table_position,
+        opponent_position=villain_position,
         pfa_position=pfa_position,
         defender_position=defender_position,
+        pot_type=pot_type,
+        preflop_summary=preflop_summary,
+        remaining_stack=remaining_stack,
         pfa_action=pfa_action,
         pfa_bet_size=pfa_bet_size,
         options=options,
@@ -141,12 +164,11 @@ def format_flop_scenario(scenario: FlopScenario) -> str:
         "Flop training scenario",
         "----------------------",
         "6-max table, effective stack 100 BB",
+        f"Pot type: {scenario.pot_type}",
         f"Pot: {scenario.pot_size:.1f} BB",
-        f"Hero role: {scenario.hero_role}",
-        f"Hero table position: {position_to_string(scenario.hero_table_position)}",
-        f"PFA position: {position_to_string(scenario.pfa_position)}",
-        f"Defender position: {position_to_string(scenario.defender_position)}",
-        f"Hero postflop position: {scenario.hero_position}",
+        f"Hero: {position_to_string(scenario.hero_table_position)}",
+        f"Opponent: {position_to_string(scenario.opponent_position)}",
+        f"Preflop: {scenario.preflop_summary}",
         f"Hero hand: {first} {second}",
         f"Flop: {flop_text}",
         "",
@@ -154,20 +176,25 @@ def format_flop_scenario(scenario: FlopScenario) -> str:
 
     if scenario.hero_role == ROLE_AGGRESSOR:
         if scenario.hero_position == POSITION_IP:
-            lines.append("Defender checks to Hero.")
+            lines.append("Opponent checks to Hero.")
         else:
-            lines.append("Hero is first to act as the preflop aggressor.")
+            lines.append("Hero is first to act.")
     elif scenario.hero_position == POSITION_OOP:
-        lines.append("Hero is the defender out of position and acts first.")
+        lines.append("Hero checks.")
+        if scenario.pfa_action == PFA_CHECK:
+            lines.append("Opponent checks back. The hand goes to the turn.")
+        else:
+            lines.append(f"Opponent bets {scenario.pfa_bet_size:.1f} BB.")
     else:
         if scenario.pfa_action == PFA_CHECK:
-            lines.append("Preflop aggressor checks.")
+            lines.append("Opponent checks.")
         else:
-            lines.append(f"Preflop aggressor bets {scenario.pfa_bet_size:.1f} BB.")
+            lines.append(f"Opponent bets {scenario.pfa_bet_size:.1f} BB.")
 
-    lines.extend(["", "Choose your action:"])
-    for index, option in enumerate(scenario.options, start=1):
-        lines.append(f"{index}. {option.label}")
+    if scenario.options:
+        lines.extend(["", "Choose your action:"])
+        for index, option in enumerate(scenario.options, start=1):
+            lines.append(f"{index}. {option.label}")
 
     return "\n".join(lines)
 
@@ -224,12 +251,28 @@ def run_flop_training_session() -> None:
     print(f"Total accuracy: {total_correct}/{total_attempts} ({accuracy:.2f}%)")
 
 
-def _make_check_bet_options(pot_size: float, hero_position: str) -> tuple[FlopOption, ...]:
+def _make_check_bet_options(
+    pot_size: float,
+    hero_position: str,
+    remaining_stack: float,
+) -> tuple[FlopOption, ...]:
     check_label = "Check back" if hero_position == POSITION_IP else "Check"
-    return (
-        FlopOption(check_label, Action.CHECK, 0.0),
-        FlopOption(f"Bet {round(pot_size * 0.50, 1):.1f} BB", Action.RAISE, round(pot_size * 0.50, 1)),
-    )
+    options = [FlopOption(check_label, Action.CHECK, 0.0)]
+    seen_amounts: set[float] = set()
+
+    for fraction, fraction_label in (
+        (0.25, "1/4 pot"),
+        (1.0 / 3.0, "1/3 pot"),
+        (0.50, "1/2 pot"),
+        (0.75, "3/4 pot"),
+    ):
+        amount = min(remaining_stack, round(pot_size * fraction, 1))
+        if amount in seen_amounts:
+            continue
+        seen_amounts.add(amount)
+        options.append(FlopOption(f"Bet {amount:.1f} BB ({fraction_label})", Action.RAISE, amount))
+
+    return tuple(options)
 
 
 def _random_position_pair() -> tuple[Position, Position]:
@@ -245,6 +288,83 @@ def _random_position_pair() -> tuple[Position, Position]:
     ))
 
 
+def _random_pot_setup() -> tuple[str, float, float]:
+    pot_type = choice((POT_SINGLE_RAISED, POT_3BET, POT_4BET, POT_5BET))
+    return {
+        POT_SINGLE_RAISED: (pot_type, choice((5.5, 6.5, 8.5)), 96.0),
+        POT_3BET: (pot_type, choice((18.5, 21.5, 24.5)), 88.0),
+        POT_4BET: (pot_type, choice((42.0, 48.0, 55.0)), 74.0),
+        POT_5BET: (pot_type, choice((72.0, 80.0, 90.0)), 52.0),
+    }[pot_type]
+
+
+def _generate_hand_for_pot_type(pot_type: str, hero_role: str) -> HoleCards:
+    while True:
+        cards = sample(FULL_DECK, 2)
+        hand = HoleCards(cards[0], cards[1])
+        hand_class = get_hand_class(hand)
+
+        if pot_type == POT_SINGLE_RAISED:
+            return hand
+        if pot_type == POT_3BET and _is_reasonable_3bet_pot_hand(hand_class):
+            return hand
+        if pot_type == POT_4BET and _is_reasonable_4bet_pot_hand(hand_class):
+            return hand
+        if pot_type == POT_5BET and _is_reasonable_5bet_pot_hand(hand_class, hero_role):
+            return hand
+
+
+def _is_reasonable_3bet_pot_hand(hand_class) -> bool:
+    if hand_class.pair and hand_class.high_rank >= int(Rank.SEVEN):
+        return True
+    if hand_class.high_rank == int(Rank.ACE) and hand_class.low_rank >= int(Rank.TEN):
+        return True
+    if hand_class.suited and hand_class.high_rank >= int(Rank.NINE):
+        return True
+    return hand_class.suited and hand_class.high_rank == int(Rank.ACE) and hand_class.low_rank >= int(Rank.FIVE)
+
+
+def _is_reasonable_4bet_pot_hand(hand_class) -> bool:
+    if hand_class.pair and hand_class.high_rank >= int(Rank.TEN):
+        return True
+    if hand_class.high_rank == int(Rank.ACE) and hand_class.low_rank >= int(Rank.QUEEN):
+        return True
+    return hand_class.suited and hand_class.high_rank == int(Rank.ACE) and hand_class.low_rank >= int(Rank.FIVE)
+
+
+def _is_reasonable_5bet_pot_hand(hand_class, hero_role: str) -> bool:
+    if hand_class.pair and hand_class.high_rank >= int(Rank.QUEEN):
+        return True
+    if hand_class.high_rank == int(Rank.ACE) and hand_class.low_rank >= int(Rank.KING):
+        return True
+    return hero_role == ROLE_DEFENDER and hand_class.pair and hand_class.high_rank == int(Rank.JACK)
+
+
+def _make_preflop_summary(
+    pot_type: str,
+    hero_role: str,
+    hero_position: Position,
+    opponent_position: Position,
+) -> str:
+    hero = f"Hero {position_to_string(hero_position)}"
+    opponent = position_to_string(opponent_position)
+
+    if hero_role == ROLE_AGGRESSOR:
+        return {
+            POT_SINGLE_RAISED: f"{hero} opens, {opponent} calls",
+            POT_3BET: f"{hero} is the 3-bettor, {opponent} calls",
+            POT_4BET: f"{hero} is the 4-bettor, {opponent} calls",
+            POT_5BET: f"{hero} is the 5-bettor, {opponent} calls",
+        }[pot_type]
+
+    return {
+        POT_SINGLE_RAISED: f"{opponent} opens, {hero} calls",
+        POT_3BET: f"{opponent} is the 3-bettor, {hero} calls",
+        POT_4BET: f"{opponent} is the 4-bettor, {hero} calls",
+        POT_5BET: f"{opponent} is the 5-bettor, {hero} calls",
+    }[pot_type]
+
+
 def _is_in_position(hero_position: Position, villain_position: Position) -> bool:
     if hero_position == Position.BB and villain_position == Position.SB:
         return True
@@ -257,13 +377,21 @@ def _is_in_position(hero_position: Position, villain_position: Position) -> bool
     return hero_position > villain_position
 
 
-def _make_facing_bet_options(bet_size: float, pot_size: float) -> tuple[FlopOption, ...]:
-    raise_size = round(pot_size + bet_size * 3.0, 1)
-    return (
+def _make_facing_bet_options(
+    bet_size: float,
+    pot_size: float,
+    remaining_stack: float,
+) -> tuple[FlopOption, ...]:
+    small_raise = min(remaining_stack, round(bet_size * 2.5, 1))
+    large_raise = min(remaining_stack, round(bet_size * 3.5, 1))
+    options = [
         FlopOption("Fold", Action.FOLD, 0.0),
         FlopOption("Call", Action.CALL, bet_size),
-        FlopOption(f"Raise to {raise_size:.1f} BB", Action.RAISE, raise_size),
-    )
+        FlopOption(f"Raise to {small_raise:.1f} BB (2.5x bet)", Action.RAISE, small_raise),
+    ]
+    if large_raise != small_raise:
+        options.append(FlopOption(f"Raise to {large_raise:.1f} BB (3.5x bet)", Action.RAISE, large_raise))
+    return tuple(options)
 
 
 def _score_flop_option(scenario: FlopScenario, texture: FlopTexture, option: FlopOption) -> FlopOptionResult:
@@ -298,6 +426,15 @@ def _score_flop_option(scenario: FlopScenario, texture: FlopTexture, option: Flo
         score -= 2.0
     if texture.made_strength <= 2 and texture.draw_strength == 0:
         score -= 2.0
+    size_ratio = option.amount / scenario.pot_size
+    if texture.made_strength >= 4:
+        score += min(2.0, size_ratio * 1.8)
+    elif texture.draw_strength >= 2:
+        score += max(0.0, 1.2 - abs(size_ratio - 0.50))
+    elif texture.made_strength <= 1:
+        score += max(0.0, 0.8 - size_ratio)
+    else:
+        score -= max(0.0, size_ratio - 0.50)
     reason = "betting or raising is preferred with value hands, strong draws, and some pressure hands"
     return FlopOptionResult(option, score, reason)
 
