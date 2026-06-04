@@ -3,17 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from random import sample
 
-from common import Card, HoleCards, Rank, Suit
+from card import BOARD_SIZE, FULL_DECK
+from common import Card, HoleCards
 from poker_eval import compare_hand_values, evaluate_7cards
 
-DECK_SIZE = 52
-BOARD_SIZE = 5
 MAX_OPPONENTS = 5
-FULL_DECK = tuple(
-    Card(rank=Rank(rank), suit=Suit(suit))
-    for suit in range(int(Suit.CLUBS), int(Suit.SPADES) + 1)
-    for rank in range(int(Rank.TWO), int(Rank.ACE) + 1)
-)
 
 
 @dataclass(frozen=True)
@@ -21,6 +15,7 @@ class EquityInput:
     hero_hand: HoleCards
     opponent_count: int
     simulations: int
+    board_cards: tuple[Card, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -35,8 +30,8 @@ class EquityResult:
     equity: float
 
 
-def _available_deck(hero_hand: HoleCards) -> tuple[Card, ...]:
-    known_cards = {hero_hand.card1, hero_hand.card2}
+def _available_deck(hero_hand: HoleCards, board_cards: tuple[Card, ...]) -> tuple[Card, ...]:
+    known_cards = {hero_hand.card1, hero_hand.card2, *board_cards}
     return tuple(card for card in FULL_DECK if card not in known_cards)
 
 
@@ -63,18 +58,21 @@ def estimate_preflop_equity(equity_input: EquityInput) -> EquityResult:
     wins = 0
     ties = 0
     losses = 0
+    equity_sum = 0.0
     hero_card1 = equity_input.hero_hand.card1
     hero_card2 = equity_input.hero_hand.card2
-    available_deck = _available_deck(equity_input.hero_hand)
-    cards_needed = opponent_count * 2 + BOARD_SIZE
+    board_cards = tuple(equity_input.board_cards[:BOARD_SIZE])
+    available_deck = _available_deck(equity_input.hero_hand, board_cards)
+    cards_needed = opponent_count * 2 + max(0, BOARD_SIZE - len(board_cards))
 
     for _ in range(simulations):
         dealt = sample(available_deck, cards_needed)
-        board = tuple(dealt[opponent_count * 2:opponent_count * 2 + BOARD_SIZE])
+        runout = tuple(dealt[opponent_count * 2:opponent_count * 2 + max(0, BOARD_SIZE - len(board_cards))])
+        board = (*board_cards, *runout)
         hero_value = _make_player_value(hero_card1, hero_card2, board)
 
         has_better_opponent = False
-        has_equal_opponent = False
+        equal_opponents = 0
 
         for opponent_index in range(opponent_count):
             first = opponent_index * 2
@@ -85,19 +83,21 @@ def estimate_preflop_equity(equity_input: EquityInput) -> EquityResult:
                 has_better_opponent = True
                 break
             if comparison == 0:
-                has_equal_opponent = True
+                equal_opponents += 1
 
         if has_better_opponent:
             losses += 1
-        elif has_equal_opponent:
+        elif equal_opponents:
             ties += 1
+            equity_sum += 1.0 / (equal_opponents + 1)
         else:
             wins += 1
+            equity_sum += 1.0
 
     win_rate = wins / simulations
     tie_rate = ties / simulations
     loss_rate = losses / simulations
-    equity = (wins + 0.5 * ties) / simulations
+    equity = equity_sum / simulations
 
     return EquityResult(
         simulations=simulations,

@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Preflop GTO Study</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1>Preflop GTO Study</h1>
+        <p>Six-max decision builder with range frequency and EV matrix.</p>
+      </div>
+      <nav class="tabs" aria-label="Mode tabs">
+        <button class="tab-button active" data-mode="study">Study</button>
+        <button class="tab-button" data-mode="trainer">Trainer</button>
+      </nav>
+    </header>
+
+    <section id="study-view" class="workspace">
+      <aside class="control-panel">
+        <div class="form-grid hidden">
+          <label class="hidden">Study position
+            <select id="hero-position">
+              <option>UTG</option>
+              <option>HJ</option>
+              <option>CO</option>
+              <option>BTN</option>
+              <option>SB</option>
+              <option>BB</option>
+            </select>
+          </label>
+          <label class="hidden">Hero hand
+            <input id="hero-hand" value="AhAs" maxlength="4">
+          </label>
+          <label class="hidden">Street
+            <select id="street">
+              <option value="preflop">Preflop</option>
+              <option value="flop">Flop</option>
+              <option value="turn">Turn</option>
+              <option value="river">River</option>
+            </select>
+          </label>
+          <label class="hidden">Board
+            <input id="board-cards" value="" maxlength="10" placeholder="AhKdQs">
+          </label>
+          <label class="hidden">Pot BB
+            <input id="pot-bb" type="number" value="4.0" min="0" step="0.5">
+          </label>
+          <label class="hidden">Call BB
+            <input id="call-bb" type="number" value="2.0" min="0" step="0.5">
+          </label>
+          <label class="hidden">Raise BB
+            <input id="raise-bb" type="number" value="8.0" min="0" step="0.5">
+          </label>
+          <label class="hidden">Raise sizes
+            <input id="raise-sizes" value="4, 8, 12" placeholder="4, 8, 12">
+          </label>
+          <label class="hidden">Opponents
+            <input id="opponents" type="number" value="1" min="0" max="5" step="1">
+          </label>
+          <label class="hidden">Simulations
+            <input id="simulations" type="number" value="1000" min="1" max="1000000" step="100">
+          </label>
+          <label class="checkbox-label hidden">Auto state
+            <input id="auto-state" type="checkbox" checked>
+          </label>
+        </div>
+
+        <div class="action-builder">
+          <div class="action-line-heading">
+            <h3>Action Line</h3>
+            <button id="clear-actions" class="compact-button">Clear</button>
+          </div>
+          <div class="action-row hidden">
+            <select id="history-position">
+              <option>UTG</option>
+              <option>HJ</option>
+              <option>CO</option>
+              <option>BTN</option>
+              <option>SB</option>
+              <option>BB</option>
+            </select>
+            <select id="history-action">
+              <option>fold</option>
+              <option>call</option>
+              <option>raise</option>
+              <option>check</option>
+            </select>
+            <input id="history-amount" type="number" value="0" min="0" step="0.5" aria-label="Action amount">
+            <button id="add-action" class="icon-button" title="Add action">+</button>
+          </div>
+          <ol id="history-list" class="history-list"></ol>
+        </div>
+
+        <button id="analyze-button" class="primary-button hidden">Analyze</button>
+        <p id="status-line" class="status-line"></p>
+
+        <aside class="detail-panel">
+          <div class="section-heading">
+            <h3>Selected Hand</h3>
+          </div>
+          <h2 id="detail-hand">Hand</h2>
+          <dl id="detail-stats"></dl>
+        </aside>
+
+        <div class="strategy-editor hidden">
+          <div class="section-heading">
+            <h3>Strategy Profile</h3>
+            <span id="profile-status" class="metric-label">Loading</span>
+          </div>
+          <div class="threshold-grid">
+            <label>Large raise
+              <input id="profile-large-raise" type="number" min="2" max="100" step="0.5">
+            </label>
+            <label>All-in
+              <input id="profile-all-in" type="number" min="2" max="100" step="0.5">
+            </label>
+          </div>
+          <div id="strategy-profile-grid" class="strategy-profile-grid"></div>
+          <button id="save-profile" class="secondary-button">Save profile</button>
+        </div>
+      </aside>
+
+      <section class="main-panel">
+        <section class="table-builder">
+          <div class="section-heading">
+            <h2>Action Line Builder</h2>
+            <div class="seat-action-controls">
+              <span id="node-status" class="node-status">Open</span>
+              <input id="seat-action-amount" class="hidden" type="number" value="0" min="0" step="0.5" aria-label="Seat action amount">
+            </div>
+          </div>
+          <div class="poker-table" aria-label="Six-max poker table">
+            <article class="seat seat-utg" data-seat="UTG">
+              <div class="seat-header"><span>UTG</span><strong>100</strong></div>
+              <div id="seat-state-UTG" class="seat-state">empty</div>
+              <div id="seat-actions-UTG" class="seat-action-list"></div>
+            </article>
+            <article class="seat seat-hj" data-seat="HJ">
+              <div class="seat-header"><span>HJ</span><strong>100</strong></div>
+              <div id="seat-state-HJ" class="seat-state">empty</div>
+              <div id="seat-actions-HJ" class="seat-action-list"></div>
+            </article>
+            <article class="seat seat-co" data-seat="CO">
+              <div class="seat-header"><span>CO</span><strong>100</strong></div>
+              <div id="seat-state-CO" class="seat-state">empty</div>
+              <div id="seat-actions-CO" class="seat-action-list"></div>
+            </article>
+            <article class="seat seat-btn" data-seat="BTN">
+              <div class="seat-header"><span>BTN</span><strong>100</strong></div>
+              <div id="seat-state-BTN" class="seat-state">empty</div>
+              <div id="seat-actions-BTN" class="seat-action-list"></div>
+            </article>
+            <article class="seat seat-sb" data-seat="SB">
+              <div class="seat-header"><span>SB</span><strong>99.5</strong></div>
+              <div id="seat-state-SB" class="seat-state">0.5 BB</div>
+              <div id="seat-actions-SB" class="seat-action-list"></div>
+            </article>
+            <article class="seat seat-bb" data-seat="BB">
+              <div class="seat-header"><span>BB</span><strong>99</strong></div>
+              <div id="seat-state-BB" class="seat-state">1.0 BB</div>
+              <div id="seat-actions-BB" class="seat-action-list"></div>
+            </article>
+            <div class="felt-center">
+              <span>Pot</span>
+              <strong id="table-pot">4.0 BB</strong>
+              <small id="table-board">Board -</small>
+              <small id="table-hero">Viewing UTG</small>
+              <small id="table-sizing">Min raise -</small>
+            </div>
+          </div>
+        </section>
+
+        <div class="summary-band">
+          <div>
+            <span class="metric-label">Viewing Position</span>
+            <strong id="summary-position">-</strong>
+          </div>
+          <div>
+            <span class="metric-label">Fold</span>
+            <strong id="summary-fold">-</strong>
+          </div>
+          <div>
+            <span class="metric-label">Call/Check</span>
+            <strong id="summary-call">-</strong>
+          </div>
+          <div>
+            <span class="metric-label">Raise</span>
+            <strong id="summary-raise">-</strong>
+          </div>
+        </div>
+
+        <div class="range-layout">
+          <section class="range-area">
+            <div class="section-heading">
+              <h2>Range Matrix</h2>
+              <div class="legend">
+                <span class="legend-item fold">Fold</span>
+                <span class="legend-item call">Call/Check</span>
+                <span class="legend-item raise">Raise</span>
+              </div>
+            </div>
+            <div id="range-grid" class="range-grid" aria-label="169 hand class matrix"></div>
+          </section>
+        </div>
+
+        <section class="opponent-panel">
+          <div class="section-heading">
+            <h2>Opponent Ranges</h2>
+            <span id="opponent-summary" class="metric-label">-</span>
+          </div>
+          <div id="opponent-ranges" class="opponent-ranges"></div>
+        </section>
+
+        <section class="table-panel">
+          <div class="section-heading">
+            <h2>All Hands</h2>
+            <input id="hand-filter" placeholder="Filter hand, action, EV">
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Hand</th>
+                  <th>Recommended</th>
+                  <th>Frequency</th>
+                  <th>EV</th>
+                  <th>Fold</th>
+                  <th>EV Fold</th>
+                  <th>Call/Check</th>
+                  <th>EV Call/Check</th>
+                  <th>Raise</th>
+                  <th>EV Raise</th>
+                  <th>Raise Sizes</th>
+                </tr>
+              </thead>
+              <tbody id="hands-table"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+    </section>
+
+    <section id="trainer-view" class="workspace hidden">
+      <aside class="control-panel">
+        <h2>Trainer</h2>
+        <label>Mode
+          <select id="trainer-mode">
+            <option value="random">Random</option>
+            <option value="facing_open">Facing Open</option>
+            <option value="facing_3bet">Facing 3-bet</option>
+            <option value="facing_4bet">Facing 4-bet</option>
+          </select>
+        </label>
+        <label>Simulations
+          <input id="trainer-simulations" type="number" value="1000" min="1" step="100">
+        </label>
+        <button id="new-question" class="primary-button">New Question</button>
+        <p id="trainer-status" class="status-line"></p>
+      </aside>
+      <section class="main-panel">
+        <div class="trainer-spot">
+          <h2 id="trainer-title">No question loaded</h2>
+          <p id="trainer-hand"></p>
+          <ol id="trainer-history" class="history-list"></ol>
+          <div id="trainer-actions" class="trainer-actions"></div>
+        </div>
+        <section id="trainer-result" class="table-panel"></section>
+      </section>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

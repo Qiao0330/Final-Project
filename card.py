@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from common import Card, HoleCards, Rank, Suit
 
+BOARD_SIZE = 5
+DECK_SIZE = 52
+FULL_DECK = tuple(
+    Card(rank=Rank(rank), suit=Suit(suit))
+    for suit in range(int(Suit.CLUBS), int(Suit.SPADES) + 1)
+    for rank in range(int(Rank.TWO), int(Rank.ACE) + 1)
+)
+
 
 _RANK_CHARS = {
     "2": Rank.TWO,
