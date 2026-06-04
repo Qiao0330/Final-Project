@@ -38,6 +38,23 @@ RFI_CALL_TARGETS = {
     Position.BTN: 0.0,
     Position.SB: 0.137,
 }
+BTN_RFI_RAISE_HANDS = frozenset(
+    """
+    AA AKs AQs AJs ATs A9s A8s A7s A6s A5s A4s A3s A2s
+    AKo KK KQs KJs KTs K9s K8s K7s K6s K5s K4s K3s K2s
+    AQo KQo QQ QJs QTs Q9s Q8s Q7s Q6s Q5s Q4s Q3s
+    AJo KJo QJo JJ JTs J9s J8s J7s J6s J5s
+    ATo KTo QTo JTo TT T9s T8s T7s T6s
+    A9o K9o Q9o J9o T9o 99 98s 97s
+    A8o K8o 88 87s 86s
+    A7o 77 76s
+    A6o 66 65s
+    A5o 55 54s
+    A4o 44
+    A3o 33
+    22
+    """.split()
+)
 
 
 @dataclass(frozen=True)
@@ -162,6 +179,9 @@ def get_preflop_frequency(pos: Position, hand_class: HandClass) -> RangeActionFr
 
 
 def _calibrated_rfi_frequency(pos: Position, hand_class: HandClass) -> tuple[float, float]:
+    if pos == Position.BTN:
+        return (1.0 if hand_class.name in BTN_RFI_RAISE_HANDS else 0.0), 0.0
+
     raise_target = RFI_RAISE_TARGETS.get(pos)
     if raise_target is None:
         return _legacy_frequency(pos, hand_class)

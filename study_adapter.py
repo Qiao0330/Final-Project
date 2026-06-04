@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from functools import lru_cache
+
 from adapter_utils import (
     action_history_from_dicts,
     action_to_label,
@@ -27,6 +30,23 @@ from range_model import (
     position_to_string,
 )
 from solver import SolverInput, action_to_string, solve_preflop_decision
+
+
+@dataclass(frozen=True)
+class SingleOpenContext:
+    hero_position: Position
+    opener_position: Position
+    in_position: bool
+    call_target: float
+    raise_target: float
+
+
+SINGLE_OPEN_TARGETS = {
+    (Position.HJ, Position.UTG): (0.014, 0.071),
+    (Position.CO, Position.HJ): (0.020, 0.083),
+    (Position.SB, Position.CO): (0.032, 0.096),
+    (Position.BB, Position.UTG): (0.175, 0.051),
+}
 
 
 def get_study_view_data(request: dict) -> dict:
@@ -329,8 +349,19 @@ def _preflop_action_profile(
         return actions, evs, _raise_options_from_score(score, raise_threshold, pot_bb, raise_amounts, total_raise)
 
     if raise_count == 1:
-        call_threshold = _defend_call_threshold(hero_position)
-        raise_threshold = _defend_raise_threshold(hero_position)
+        opener_position = next(
+            record.position
+            for record in action_history
+            if record.action == Action.RAISE
+        )
+        return _single_open_action_profile(
+            hero_position,
+            opener_position,
+            hand_class,
+            call_amount_bb,
+            pot_bb,
+            raise_amounts,
+        )
     else:
         call_threshold = _three_bet_call_threshold(hero_position)
         raise_threshold = _three_bet_raise_threshold(hero_position)
@@ -349,6 +380,202 @@ def _preflop_action_profile(
         "Raise": total_raise,
     }
     return actions, evs, _raise_options_from_score(score, raise_threshold, pot_bb, raise_amounts, total_raise)
+
+
+def _single_open_action_profile(
+    hero_position: Position,
+    opener_position: Position,
+    hand_class,
+    call_amount_bb: float,
+    pot_bb: float,
+    raise_amounts: tuple[float, ...],
+) -> tuple[dict[str, float], dict[str, float], list[dict]]:
+    context = _single_open_context(hero_position, opener_position)
+    call_map, raise_map, call_boundary, raise_boundary = _single_open_strategy(context)
+    call_frequency = call_map.get(hand_class.name, 0.0) * 100.0
+    raise_frequency = raise_map.get(hand_class.name, 0.0) * 100.0
+    fold_frequency = max(0.0, 100.0 - call_frequency - raise_frequency)
+
+    call_score = _call_suitability(hand_class, context)
+    raise_score = _raise_suitability(hand_class, context)
+    pot_odds = call_amount_bb / max(0.01, pot_bb + call_amount_bb)
+    position_realization = 0.08 if context.in_position else -0.08
+    blind_discount = 0.10 if hero_position == Position.BB else 0.0
+    call_ev = (call_score - call_boundary) / 18.0 + position_realization + blind_discount - pot_odds * 0.15
+    raise_ev = (raise_score - raise_boundary) / 15.0 + pot_bb * 0.025
+    evs = {
+        "Fold": 0.0,
+        "Call": call_ev,
+        "Raise": raise_ev,
+    }
+    actions = {
+        "Fold": fold_frequency,
+        "Call": call_frequency,
+        "Raise": raise_frequency,
+    }
+    return actions, evs, _raise_options_from_base_ev(
+        raise_ev,
+        raise_score,
+        raise_amounts,
+        raise_frequency,
+    )
+
+
+def _single_open_context(hero_position: Position, opener_position: Position) -> SingleOpenContext:
+    targets = SINGLE_OPEN_TARGETS.get((hero_position, opener_position))
+    if targets is None:
+        targets = _estimated_single_open_targets(hero_position, opener_position)
+    return SingleOpenContext(
+        hero_position=hero_position,
+        opener_position=opener_position,
+        in_position=hero_position not in (Position.SB, Position.BB),
+        call_target=targets[0],
+        raise_target=targets[1],
+    )
+
+
+def _estimated_single_open_targets(hero_position: Position, opener_position: Position) -> tuple[float, float]:
+    opener_lateness = int(opener_position) / int(Position.BTN)
+    if hero_position == Position.BB:
+        return 0.17 + opener_lateness * 0.16, 0.05 + opener_lateness * 0.03
+    if hero_position == Position.SB:
+        return 0.025 + opener_lateness * 0.025, 0.085 + opener_lateness * 0.025
+    return 0.012 + opener_lateness * 0.018, 0.07 + opener_lateness * 0.025
+
+
+@lru_cache(maxsize=None)
+def _single_open_strategy(
+    context: SingleOpenContext,
+) -> tuple[dict[str, float], dict[str, float], float, float]:
+    hand_classes = all_preflop_hand_classes()
+    raise_scores = {
+        hand_class.name: _raise_suitability(hand_class, context)
+        for hand_class in hand_classes
+    }
+    raise_map, raise_boundary = _allocate_ranked_frequency(
+        hand_classes,
+        raise_scores,
+        context.raise_target,
+    )
+    call_candidates = tuple(
+        hand_class
+        for hand_class in hand_classes
+        if raise_map.get(hand_class.name, 0.0) < 1.0
+    )
+    call_scores = {
+        hand_class.name: _call_suitability(hand_class, context)
+        for hand_class in call_candidates
+    }
+    call_map, call_boundary = _allocate_ranked_frequency(
+        call_candidates,
+        call_scores,
+        context.call_target,
+        excluded=raise_map,
+    )
+    return call_map, raise_map, call_boundary, raise_boundary
+
+
+def _allocate_ranked_frequency(
+    hand_classes,
+    scores: dict[str, float],
+    target_fraction: float,
+    excluded: dict[str, float] | None = None,
+) -> tuple[dict[str, float], float]:
+    excluded = excluded or {}
+    target_combos = 1326.0 * max(0.0, min(1.0, target_fraction))
+    selected: dict[str, float] = {}
+    used_combos = 0.0
+    boundary = min(scores.values(), default=0.0)
+    candidates = sorted(
+        hand_classes,
+        key=lambda item: (scores[item.name], _hand_combo_count(item)),
+        reverse=True,
+    )
+    for candidate in candidates:
+        available_frequency = 1.0 - excluded.get(candidate.name, 0.0)
+        if available_frequency <= 0.0:
+            continue
+        remaining = target_combos - used_combos
+        if remaining <= 0.0:
+            break
+        combos = _hand_combo_count(candidate)
+        frequency = min(available_frequency, remaining / combos)
+        if frequency > 0.0:
+            selected[candidate.name] = frequency
+            used_combos += combos * frequency
+            boundary = scores[candidate.name]
+    return selected, boundary
+
+
+def _call_suitability(hand_class, context: SingleOpenContext) -> float:
+    high = hand_class.high_rank
+    low = hand_class.low_rank
+    gap = max(0, high - low - 1)
+    score = high * 1.6 + low * 1.1
+    if hand_class.pair:
+        score += 28.0 + high
+    if hand_class.suited:
+        score += 12.0
+    score += max(0.0, 10.0 - gap * 3.0)
+    if high >= int(Rank.TEN) and low >= int(Rank.TEN):
+        score += 5.0
+    if high == int(Rank.ACE) and low <= int(Rank.FIVE) and hand_class.suited:
+        score += 5.0
+    if not hand_class.suited and not hand_class.pair and low < int(Rank.TEN):
+        score -= 7.0
+    if context.in_position:
+        score += 5.0
+    if context.hero_position == Position.BB:
+        score += 9.0
+        if hand_class.suited and gap <= 1:
+            score += 6.0
+    if context.opener_position in (Position.UTG, Position.HJ):
+        score -= 3.0
+    return score
+
+
+def _raise_suitability(hand_class, context: SingleOpenContext) -> float:
+    high = hand_class.high_rank
+    low = hand_class.low_rank
+    gap = max(0, high - low - 1)
+    value_score = high * 1.8 + low * 1.2
+    if hand_class.pair:
+        if high >= int(Rank.TEN):
+            value_score += 22.0 + high * 2.0
+        else:
+            value_score += 8.0 + high
+    if high >= int(Rank.TEN) and low >= int(Rank.TEN):
+        value_score += 7.0
+
+    blocker_score = 0.0
+    if high == int(Rank.ACE):
+        blocker_score += 8.0
+    elif high == int(Rank.KING):
+        blocker_score += 4.0
+    if hand_class.suited:
+        blocker_score += 4.0
+    if high == int(Rank.ACE) and low <= int(Rank.FIVE) and hand_class.suited:
+        blocker_score += 12.0
+    if hand_class.suited and gap <= 1:
+        blocker_score += 3.0
+    if not hand_class.suited and not hand_class.pair and low < int(Rank.TEN):
+        blocker_score -= 8.0
+    if context.opener_position in (Position.UTG, Position.HJ):
+        blocker_score -= 2.0
+        if (
+            context.hero_position == Position.BB
+            and hand_class.suited
+            and high == int(Rank.KING)
+            and low >= int(Rank.TEN)
+        ):
+            blocker_score -= 9.0
+    return value_score + blocker_score
+
+
+def _hand_combo_count(hand_class) -> int:
+    if hand_class.pair:
+        return 6
+    return 4 if hand_class.suited else 12
 
 
 def _recommended_action(actions: dict[str, float], evs: dict[str, float]) -> str:
@@ -468,6 +695,25 @@ def _raise_options_from_score(
     total_raise_frequency: float,
 ) -> list[dict]:
     raise_evs = _raise_option_evs_from_score(score, threshold, pot_bb, raise_amounts)
+    return _raise_options(raise_evs, total_raise_frequency)
+
+
+def _raise_options_from_base_ev(
+    base_ev: float,
+    raise_score: float,
+    raise_amounts: tuple[float, ...],
+    total_raise_frequency: float,
+) -> list[dict]:
+    clean_amounts = tuple(amount for amount in raise_amounts if amount > 0.0)
+    if not clean_amounts:
+        return []
+    min_amount = min(clean_amounts)
+    raise_evs = {}
+    for amount in clean_amounts:
+        size_ratio = (amount - min_amount) / max(1.0, min_amount)
+        premium_bonus = max(0.0, raise_score - 70.0) / 30.0 * size_ratio
+        bluff_penalty = max(0.0, 65.0 - raise_score) / 24.0 * size_ratio
+        raise_evs[_raise_label(amount)] = base_ev + premium_bonus - bluff_penalty
     return _raise_options(raise_evs, total_raise_frequency)
 
 

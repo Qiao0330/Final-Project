@@ -3,8 +3,10 @@ from betting_state import derive_preflop_state
 from common import Action, PlayerAction, Position
 from poker_eval import HandCategory, compare_hand_values, evaluate_7cards
 from range_model import (
+    all_preflop_hand_classes,
     estimate_open_fold_probability,
     get_hand_class,
+    get_preflop_frequency,
     is_hand_in_open_range,
     players_behind_count,
 )
@@ -156,6 +158,32 @@ def test_range_model():
     assert hand is not None
     fold_probability = estimate_open_fold_probability(Position.BTN, hand, 1.5, 2.5)
     assert 0.0 <= fold_probability <= 1.0
+
+
+def test_button_rfi_matches_reference_shape():
+    expected_raise = {
+        "AA", "AKs", "AQs", "AJs", "ATs", "A9s", "A2s",
+        "KQo", "Q3s", "J5s", "T6s", "76s", "65s", "54s", "22",
+    }
+    expected_fold = {"K7o", "Q8o", "A2o", "T5s", "64s", "32s"}
+
+    classes = {hand_class.name: hand_class for hand_class in all_preflop_hand_classes()}
+    for hand_name in expected_raise:
+        frequency = get_preflop_frequency(Position.BTN, classes[hand_name])
+        assert frequency.raise_frequency == 1.0
+        assert frequency.call_frequency == 0.0
+    for hand_name in expected_fold:
+        frequency = get_preflop_frequency(Position.BTN, classes[hand_name])
+        assert frequency.raise_frequency == 0.0
+        assert frequency.call_frequency == 0.0
+
+    total_combos = 0
+    raise_combos = 0
+    for hand_class in classes.values():
+        combos = 6 if hand_class.pair else 4 if hand_class.suited else 12
+        total_combos += combos
+        raise_combos += combos * get_preflop_frequency(Position.BTN, hand_class).raise_frequency
+    assert round(raise_combos / total_combos * 100, 1) == 40.6
 
 
 def test_preflop_betting_state_derivation():
@@ -390,6 +418,58 @@ def test_calibrated_rfi_frequencies_match_reference_targets():
         assert actual == expected
 
 
+def test_single_open_context_model_matches_reference_targets_and_shapes():
+    spots = {
+        ("HJ", "UTG"): {"Raise": 7.1, "Call": 1.4, "Fold": 91.5},
+        ("CO", "HJ"): {"Raise": 8.3, "Call": 2.0, "Fold": 89.7},
+        ("SB", "CO"): {"Raise": 9.6, "Call": 3.2, "Fold": 87.2},
+        ("BB", "UTG"): {"Raise": 5.1, "Call": 17.5, "Fold": 77.4},
+    }
+    results = {}
+    for (hero_position, opener_position), expected in spots.items():
+        data = get_study_view_data(
+            {
+                "hero_position": hero_position,
+                "hero_hand": "AhAs",
+                "simulations": 5,
+                "range_simulations": 1,
+                "action_history": [
+                    {"position": opener_position, "action": "raise", "amount": 2.5},
+                ],
+                "auto_state": True,
+            }
+        )
+        weighted = {"Fold": 0.0, "Call": 0.0, "Raise": 0.0}
+        combo_total = 0
+        for item in data["range_grid"]:
+            combos = 6 if item["pair"] else (4 if item["suited"] else 12)
+            combo_total += combos
+            for action in weighted:
+                weighted[action] += item["actions"].get(action, 0.0) * combos
+        actual = {
+            action: round(total / combo_total, 1)
+            for action, total in weighted.items()
+        }
+        assert actual == expected
+        results[(hero_position, opener_position)] = {
+            item["hand"]: item
+            for item in data["range_grid"]
+        }
+
+    bb_vs_utg = results[("BB", "UTG")]
+    assert bb_vs_utg["AA"]["recommended"] == "Raise"
+    assert bb_vs_utg["A5s"]["recommended"] == "Raise"
+    assert bb_vs_utg["KQs"]["recommended"] == "Call"
+    assert bb_vs_utg["76s"]["recommended"] == "Call"
+    assert bb_vs_utg["22"]["recommended"] == "Call"
+    assert bb_vs_utg["72o"]["recommended"] == "Fold"
+
+    hj_vs_utg = results[("HJ", "UTG")]
+    assert hj_vs_utg["AA"]["recommended"] == "Raise"
+    assert hj_vs_utg["99"]["recommended"] == "Call"
+    assert hj_vs_utg["76s"]["recommended"] == "Fold"
+
+
 def test_study_adapter_output_shape():
     data = get_study_view_data(
         {
@@ -578,6 +658,7 @@ if __name__ == "__main__":
     test_solver_check_and_raise_sizes()
     test_mixed_frequencies_from_evs()
     test_calibrated_rfi_frequencies_match_reference_targets()
+    test_single_open_context_model_matches_reference_targets_and_shapes()
     test_study_adapter_output_shape()
     test_strategy_profile_normalization()
     test_trainer_adapter_question_and_grade()
