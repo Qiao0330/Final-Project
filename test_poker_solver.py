@@ -209,6 +209,12 @@ def test_button_rfi_matches_reference_shape():
 
 
 def test_preflop_betting_state_derivation():
+    def node_actions(state, position):
+        return tuple(
+            (record.position, record.action, record.amount)
+            for record in state.view_nodes[position]
+        )
+
     state = derive_preflop_state(
         Position.BB,
         (
@@ -285,6 +291,40 @@ def test_preflop_betting_state_derivation():
         (PlayerAction(Position.UTG, Action.RAISE, 100.0),),
     )
     assert facing_all_in.legal_actions == (Action.FOLD, Action.CALL)
+
+    open_first = derive_preflop_state(Position.BTN, ())
+    assert node_actions(open_first, Position.BTN) == (
+        (Position.UTG, Action.FOLD, 0.0),
+        (Position.HJ, Action.FOLD, 0.0),
+        (Position.CO, Action.FOLD, 0.0),
+    )
+
+    facing_open = derive_preflop_state(
+        Position.BTN,
+        (PlayerAction(Position.UTG, Action.RAISE, 2.5),),
+    )
+    assert node_actions(facing_open, Position.BTN) == (
+        (Position.UTG, Action.RAISE, 2.5),
+        (Position.HJ, Action.FOLD, 0.0),
+        (Position.CO, Action.FOLD, 0.0),
+    )
+
+    reopened_utg = derive_preflop_state(
+        Position.UTG,
+        (
+            PlayerAction(Position.UTG, Action.RAISE, 2.5),
+            PlayerAction(Position.HJ, Action.FOLD, 0.0),
+            PlayerAction(Position.CO, Action.RAISE, 8.0),
+        ),
+    )
+    assert node_actions(reopened_utg, Position.UTG) == (
+        (Position.UTG, Action.RAISE, 2.5),
+        (Position.HJ, Action.FOLD, 0.0),
+        (Position.CO, Action.RAISE, 8.0),
+        (Position.BTN, Action.FOLD, 0.0),
+        (Position.SB, Action.FOLD, 0.0),
+        (Position.BB, Action.FOLD, 0.0),
+    )
 
 
 def test_solver_counts_position_order_context():
@@ -664,6 +704,33 @@ def test_study_adapter_output_shape():
     assert len(aa_multi["raise_options"]) == 3
     assert all("ev" in option and "frequency" in option for option in aa_multi["raise_options"])
     assert abs(sum(option["frequency"] for option in aa_multi["raise_options"]) - aa_multi["actions"]["Raise"]) < 0.0001
+
+    four_bet_data = get_study_view_data(
+        {
+            "hero_position": "SB",
+            "hero_hand": "AsAh",
+            "raise_amount_bb": 0.0,
+            "simulations": 10,
+            "range_simulations": 20,
+            "action_history": [
+                {"position": "UTG", "action": "raise", "amount": 2.5},
+                {"position": "HJ", "action": "fold", "amount": 0.0},
+                {"position": "CO", "action": "fold", "amount": 0.0},
+                {"position": "BTN", "action": "fold", "amount": 0.0},
+                {"position": "SB", "action": "raise", "amount": 10.0},
+                {"position": "BB", "action": "fold", "amount": 0.0},
+                {"position": "UTG", "action": "raise", "amount": 22.5},
+            ],
+            "auto_state": True,
+        }
+    )
+    four_bet_aa = next(item for item in four_bet_data["range_grid"] if item["hand"] == "AA")
+    four_bet_a9s = next(item for item in four_bet_data["range_grid"] if item["hand"] == "A9s")
+    assert four_bet_data["betting_state"]["next_to_act"] == "SB"
+    assert four_bet_aa["recommended"] == "Raise"
+    assert four_bet_aa["actions"]["Raise"] > 0.0
+    assert four_bet_a9s["actions"]["Raise"] == 0.0
+    assert four_bet_a9s["recommended"] == "Fold"
 
     flop_data = get_study_view_data(
         {

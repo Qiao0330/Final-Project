@@ -24,6 +24,7 @@ class PreflopBettingState:
     min_raise_total: float
     max_raise_total: float
     validation_errors: tuple[str, ...]
+    view_nodes: dict[Position, tuple[PlayerAction, ...]]
 
 
 def derive_preflop_state(
@@ -39,6 +40,8 @@ def derive_preflop_state(
     last_raise_increment = 1.0
     last_actor: Position | None = None
     validation_errors: list[str] = []
+    processed_records: list[PlayerAction] = []
+    view_nodes: dict[Position, tuple[PlayerAction, ...]] = {}
 
     for record in action_history:
         position = record.position
@@ -56,16 +59,20 @@ def derive_preflop_state(
             validation_errors.append(f"{position_to_string(position)} already folded")
             continue
         if record.action == Action.FOLD:
+            view_nodes[position] = tuple(processed_records)
             folded.add(position)
             acted.add(position)
             last_actor = position
+            processed_records.append(record)
             continue
         if record.action == Action.CHECK:
             if current_bet > contributions[position]:
                 validation_errors.append(f"{position_to_string(position)} cannot check facing {current_bet - contributions[position]:.2f} BB")
                 continue
+            view_nodes[position] = tuple(processed_records)
             acted.add(position)
             last_actor = position
+            processed_records.append(record)
             continue
         if record.action == Action.CALL:
             amount_to_call = max(0.0, current_bet - contributions[position])
@@ -78,9 +85,11 @@ def derive_preflop_state(
                     f"{position_to_string(position)} call must add exactly {amount_added:.2f} BB"
                 )
                 continue
+            view_nodes[position] = tuple(processed_records)
             contributions[position] += amount_added
             acted.add(position)
             last_actor = position
+            processed_records.append(record)
             continue
         if record.action == Action.RAISE:
             new_total = min(record.amount, EFFECTIVE_STACK_BB)
@@ -91,6 +100,7 @@ def derive_preflop_state(
             if new_total < min_total and new_total < EFFECTIVE_STACK_BB:
                 validation_errors.append(f"{position_to_string(position)} raise total must be at least {min_total:.2f} BB")
                 continue
+            view_nodes[position] = tuple(processed_records)
             raise_increment = max(0.0, new_total - current_bet)
             contributions[position] = new_total
             current_bet = new_total
@@ -98,6 +108,7 @@ def derive_preflop_state(
                 last_raise_increment = raise_increment
             acted = {position}
             last_actor = position
+            processed_records.append(record)
 
     pot_size = sum(contributions.values())
     call_amount = 0.0 if hero_position in folded else max(0.0, current_bet - contributions[hero_position])
@@ -113,6 +124,15 @@ def derive_preflop_state(
     next_to_act = _next_to_act(folded, contributions, current_bet, acted, last_actor)
     legal_actions = _legal_actions(next_to_act, folded, contributions, current_bet)
     min_raise_total = _min_raise_total(current_bet, last_raise_increment)
+    generated_view_nodes = _complete_view_nodes(
+        processed_records=tuple(processed_records),
+        existing_nodes=view_nodes,
+        folded=folded,
+        contributions=contributions,
+        current_bet=current_bet,
+        acted=acted,
+        last_actor=last_actor,
+    )
 
     return PreflopBettingState(
         pot_size=pot_size,
@@ -127,6 +147,7 @@ def derive_preflop_state(
         min_raise_total=min_raise_total,
         max_raise_total=EFFECTIVE_STACK_BB,
         validation_errors=tuple(validation_errors),
+        view_nodes=generated_view_nodes,
     )
 
 
@@ -149,6 +170,13 @@ def betting_state_to_dict(state: PreflopBettingState) -> dict:
         "min_raise_total_bb": state.min_raise_total,
         "max_raise_total_bb": state.max_raise_total,
         "validation_errors": list(state.validation_errors),
+        "view_nodes": {
+            position_to_string(position): [
+                _action_record_to_dict(record)
+                for record in history
+            ]
+            for position, history in state.view_nodes.items()
+        },
         "legal_actions": [
             _action_to_string(action)
             for action in state.legal_actions
@@ -157,6 +185,89 @@ def betting_state_to_dict(state: PreflopBettingState) -> dict:
             position_to_string(position): _seat_state_to_dict(position, state)
             for position in POSITIONS
         },
+    }
+
+
+def _complete_view_nodes(
+    processed_records: tuple[PlayerAction, ...],
+    existing_nodes: dict[Position, tuple[PlayerAction, ...]],
+    folded: set[Position],
+    contributions: dict[Position, float],
+    current_bet: float,
+    acted: set[Position],
+    last_actor: Position | None,
+) -> dict[Position, tuple[PlayerAction, ...]]:
+    nodes = dict(existing_nodes)
+    for target in POSITIONS:
+        if target in nodes and target in folded:
+            continue
+        generated = _generate_view_node_to_target(
+            target=target,
+            processed_records=processed_records,
+            folded=folded,
+            contributions=contributions,
+            current_bet=current_bet,
+            acted=acted,
+            last_actor=last_actor,
+        )
+        if generated is not None:
+            nodes[target] = generated
+        elif target in nodes:
+            continue
+    return {
+        position: nodes[position]
+        for position in POSITIONS
+        if position in nodes
+    }
+
+
+def _generate_view_node_to_target(
+    target: Position,
+    processed_records: tuple[PlayerAction, ...],
+    folded: set[Position],
+    contributions: dict[Position, float],
+    current_bet: float,
+    acted: set[Position],
+    last_actor: Position | None,
+) -> tuple[PlayerAction, ...] | None:
+    if target in folded:
+        return None
+    local_folded = set(folded)
+    local_contributions = dict(contributions)
+    local_acted = set(acted)
+    local_last_actor = last_actor
+    generated = list(processed_records)
+
+    for _ in range(len(POSITIONS) * 2):
+        next_position = _next_to_act(
+            local_folded,
+            local_contributions,
+            current_bet,
+            local_acted,
+            local_last_actor,
+        )
+        if next_position is None:
+            return None
+        if next_position == target:
+            return tuple(generated)
+
+        to_call = max(0.0, current_bet - local_contributions[next_position])
+        if to_call > 0.0:
+            record = PlayerAction(next_position, Action.FOLD, 0.0)
+            local_folded.add(next_position)
+        else:
+            record = PlayerAction(next_position, Action.CHECK, 0.0)
+        generated.append(record)
+        local_acted.add(next_position)
+        local_last_actor = next_position
+    return None
+
+
+def _action_record_to_dict(record: PlayerAction) -> dict:
+    return {
+        "position": position_to_string(record.position),
+        "action": _action_to_string(record.action),
+        "amount": record.amount,
     }
 
 

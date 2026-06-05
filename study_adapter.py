@@ -413,9 +413,16 @@ def _preflop_action_profile(
             pot_bb,
             raise_amounts,
         )
-    else:
+    elif raise_count == 2:
         call_threshold = _three_bet_call_threshold(hero_position)
         raise_threshold = _three_bet_raise_threshold(hero_position)
+    else:
+        return _facing_four_bet_action_profile(
+            hand_class,
+            call_amount_bb,
+            pot_bb,
+            raise_amounts,
+        )
 
     total_raise = _frequency_from_threshold(score, raise_threshold)
     call_frequency = _call_frequency_from_threshold(score, call_threshold, total_raise)
@@ -431,6 +438,55 @@ def _preflop_action_profile(
         "Raise": total_raise,
     }
     return actions, evs, _raise_options_from_score(score, raise_threshold, pot_bb, raise_amounts, total_raise)
+
+
+def _facing_four_bet_action_profile(
+    hand_class,
+    call_amount_bb: float,
+    pot_bb: float,
+    raise_amounts: tuple[float, ...],
+) -> tuple[dict[str, float], dict[str, float], list[dict]]:
+    score = hand_strength_score(hand_class)
+    raise_threshold = 82
+    call_threshold = 80
+
+    if score >= 87:
+        raise_frequency = 75.0
+    elif score >= 84:
+        raise_frequency = 45.0
+    elif score >= 82:
+        raise_frequency = 25.0
+    else:
+        raise_frequency = 0.0
+
+    if score >= 84:
+        call_frequency = max(0.0, 100.0 - raise_frequency)
+    elif score >= 80:
+        call_frequency = max(0.0, 45.0 - raise_frequency * 0.35)
+    elif score >= 77:
+        call_frequency = max(0.0, 20.0 - raise_frequency * 0.25)
+    else:
+        call_frequency = 0.0
+
+    fold_frequency = max(0.0, 100.0 - call_frequency - raise_frequency)
+    pot_odds = call_amount_bb / max(0.01, pot_bb + call_amount_bb)
+    evs = {
+        "Fold": 0.0,
+        "Call": (score - call_threshold) / 13.0 - pot_odds * 0.12,
+        "Raise": _best_raise_ev(score, raise_threshold, pot_bb, raise_amounts),
+    }
+    actions = {
+        "Fold": fold_frequency,
+        "Call": call_frequency,
+        "Raise": raise_frequency,
+    }
+    return actions, evs, _raise_options_from_score(
+        score,
+        raise_threshold,
+        pot_bb,
+        raise_amounts,
+        raise_frequency,
+    )
 
 
 def _single_open_action_profile(
@@ -630,7 +686,12 @@ def _hand_combo_count(hand_class) -> int:
 
 
 def _recommended_action(actions: dict[str, float], evs: dict[str, float]) -> str:
-    legal_names = [name for name in actions if name in evs]
+    legal_names = [
+        name for name in actions
+        if name in evs and actions.get(name, 0.0) > 0.0
+    ]
+    if not legal_names:
+        legal_names = [name for name in actions if name in evs]
     return max(legal_names, key=lambda name: evs[name]) if legal_names else max(evs, key=evs.get)
 
 

@@ -450,6 +450,31 @@ function buildOpenHistoryToSeat(seat) {
   }));
 }
 
+function buildHistoryToSeatDecision(seat) {
+  const existingSeatActionIndex = state.history.findIndex((record) => record.position === seat);
+  if (existingSeatActionIndex >= 0) {
+    return state.history.slice(0, existingSeatActionIndex);
+  }
+
+  const targetIndex = SEATS.indexOf(seat);
+  if (targetIndex <= 0) return [];
+
+  const firstActionBySeat = new Map();
+  state.history.forEach((record) => {
+    if (!firstActionBySeat.has(record.position)) {
+      firstActionBySeat.set(record.position, record);
+    }
+  });
+
+  return SEATS.slice(0, targetIndex).map((position) => (
+    firstActionBySeat.get(position) || {
+      position: position,
+      action: "fold",
+      amount: 0,
+    }
+  ));
+}
+
 function inferNextSeatAfterHistory() {
   if (state.history.length === 0) return "UTG";
   const actedSeats = new Set(state.history.map((record) => record.position));
@@ -459,9 +484,12 @@ function inferNextSeatAfterHistory() {
 function selectStudySeat(seat) {
   const currentNextToAct = state.studyData?.betting_state?.next_to_act;
   const hasOpenHistory = state.history.length > 0;
+  const viewNode = state.studyData?.betting_state?.view_nodes?.[seat];
   setStudyPosition(seat);
-  if (!hasOpenHistory || seat !== currentNextToAct) {
-    state.history = buildOpenHistoryToSeat(seat);
+  if (viewNode) {
+    state.history = viewNode;
+  } else if (!hasOpenHistory || seat !== currentNextToAct) {
+    state.history = buildHistoryToSeatDecision(seat);
   }
   renderHistory();
   analyze();
