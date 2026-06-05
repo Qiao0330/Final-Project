@@ -17,6 +17,7 @@ from equity import EquityInput, estimate_preflop_equity
 from range_equity import OpponentRange, RangeCandidate, estimate_equity_against_ranges
 from study_adapter import get_study_view_data
 from trainer_adapter import get_trainer_question, grade_trainer_answer
+from flop_trainer_adapter import get_flop_trainer_question, grade_flop_trainer_answer
 from trainer import generate_random_scenario
 
 
@@ -796,6 +797,30 @@ def test_trainer_adapter_question_and_grade():
         assert state.next_to_act == scenario.hero_position
 
 
+def test_flop_trainer_adapter_question_and_grade():
+    question = get_flop_trainer_question({"pot_type": "single_raised_pot"})
+    assert question["question_id"]
+    assert question["mode"] == "trainer"
+    assert question["street"] == "flop"
+    assert question["pot_type"] == "Single-raised pot"
+    assert len(question["flop_cards"]) == 3
+    assert question["available_actions"]
+    assert question["preflop_summary"]
+
+    result = grade_flop_trainer_answer(
+        question["question_id"],
+        question["available_actions"][0],
+    )
+    assert result["question_id"] == question["question_id"]
+    assert result["street"] == "flop"
+    assert result["correct_action"]
+    assert result["accepted_actions"]
+    assert result["actions"]
+    assert result["texture"]["summary"]
+    assert result["metrics"]["equity"] >= 0.0
+    assert 0 <= result["score"] <= 100
+
+
 if __name__ == "__main__":
     test_card_parsing()
     test_board_parsing_and_equity()
@@ -812,4 +837,5 @@ if __name__ == "__main__":
     test_study_adapter_output_shape()
     test_strategy_profile_normalization()
     test_trainer_adapter_question_and_grade()
+    test_flop_trainer_adapter_question_and_grade()
     print("All Python tests passed.")

@@ -16,6 +16,15 @@ function formatNumber(value, digits = 2) {
   return Number(value).toFixed(digits);
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 function formatRaiseOptions(options) {
   if (!options || options.length === 0) return "-";
   return options
@@ -84,6 +93,12 @@ function setMode(mode) {
   });
   el("study-view").classList.toggle("hidden", mode !== "study");
   el("trainer-view").classList.toggle("hidden", mode !== "trainer");
+}
+
+function updateTrainerControls() {
+  const street = el("trainer-street").value;
+  el("preflop-mode-label").classList.toggle("hidden", street !== "preflop");
+  el("flop-mode-label").classList.toggle("hidden", street !== "flop");
 }
 
 function renderHistory() {
@@ -592,10 +607,16 @@ function renderHandsTable(items) {
 async function loadTrainerQuestion() {
   el("trainer-status").textContent = "Loading question...";
   try {
-    const question = await postJson("/api/trainer/question", {
+    const street = el("trainer-street").value;
+    const endpoint = street === "flop" ? "/api/flop-trainer/question" : "/api/trainer/question";
+    const payload = street === "flop" ? {
+      simulations: Number(el("trainer-simulations").value),
+      pot_type: el("flop-trainer-mode").value,
+    } : {
       simulations: Number(el("trainer-simulations").value),
       scenario_type: el("trainer-mode").value,
-    });
+    };
+    const question = await postJson(endpoint, payload);
     state.trainerQuestion = question;
     renderTrainerQuestion(question);
     el("trainer-status").textContent = question.question_id;
@@ -605,6 +626,10 @@ async function loadTrainerQuestion() {
 }
 
 function renderTrainerQuestion(question) {
+  if (question.street === "flop") {
+    renderFlopTrainerQuestion(question);
+    return;
+  }
   const scenarioLabel = {
     open_first: "Open First",
     facing_open: "Facing Open",
@@ -617,6 +642,8 @@ function renderTrainerQuestion(question) {
   if (question.three_bet_size_bb) sizingParts.push(`3-bet ${formatNumber(question.three_bet_size_bb, 1)} BB`);
   if (question.four_bet_size_bb) sizingParts.push(`4-bet ${formatNumber(question.four_bet_size_bb, 1)} BB`);
   el("trainer-hand").textContent = `${question.hero_hand} | Pot ${formatNumber(question.pot_bb, 1)} BB | Call ${formatNumber(question.call_amount_bb, 1)} BB${sizingParts.length ? ` | ${sizingParts.join(" | ")}` : ""}`;
+  el("flop-summary").classList.add("hidden");
+  el("flop-summary").innerHTML = "";
   const history = el("trainer-history");
   history.innerHTML = "";
   question.action_history.forEach((record) => {
@@ -635,11 +662,67 @@ function renderTrainerQuestion(question) {
   el("trainer-result").innerHTML = "";
 }
 
+function renderFlopTrainerQuestion(question) {
+  el("trainer-title").textContent = `${question.hero_table_position} | ${question.pot_type}`;
+  el("trainer-hand").textContent = `${question.hero_hand} | Flop ${formatFlopCards(question.flop_cards)} | Pot ${formatNumber(question.pot_bb, 1)} BB`;
+  const summary = el("flop-summary");
+  summary.classList.remove("hidden");
+  summary.innerHTML = `
+    <div>
+      <span class="metric-label">Role</span>
+      <strong>${escapeHtml(question.hero_role)}</strong>
+    </div>
+    <div>
+      <span class="metric-label">Position</span>
+      <strong>${escapeHtml(question.hero_relative_position)}</strong>
+    </div>
+    <div>
+      <span class="metric-label">Opponent</span>
+      <strong>${escapeHtml(question.opponent_position)}</strong>
+    </div>
+    <div>
+      <span class="metric-label">Stack</span>
+      <strong>${formatNumber(question.remaining_stack_bb, 1)} BB</strong>
+    </div>
+  `;
+
+  const history = el("trainer-history");
+  history.innerHTML = "";
+  [
+    question.preflop_summary,
+    question.pfa_action === "bet"
+      ? `Flop: ${question.pfa_position} bets ${formatNumber(question.pfa_bet_size_bb, 1)} BB`
+      : question.pfa_action === "check"
+      ? "Flop: preflop aggressor checks"
+      : "Flop: Hero to act",
+  ].forEach((text) => {
+    const item = document.createElement("li");
+    item.textContent = text;
+    history.appendChild(item);
+  });
+
+  const actions = el("trainer-actions");
+  actions.innerHTML = "";
+  question.available_actions.forEach((action) => {
+    const button = document.createElement("button");
+    button.textContent = action;
+    button.addEventListener("click", () => gradeTrainer(action));
+    actions.appendChild(button);
+  });
+  el("trainer-result").innerHTML = "";
+}
+
+function formatFlopCards(cards) {
+  if (!cards || cards.length === 0) return "-";
+  return cards.join(" ");
+}
+
 async function gradeTrainer(action) {
   if (!state.trainerQuestion) return;
   el("trainer-status").textContent = "Grading...";
   try {
-    const result = await postJson("/api/trainer/grade", {
+    const endpoint = state.trainerQuestion.street === "flop" ? "/api/flop-trainer/grade" : "/api/trainer/grade";
+    const result = await postJson(endpoint, {
       question_id: state.trainerQuestion.question_id,
       user_action: action,
     });
@@ -651,6 +734,10 @@ async function gradeTrainer(action) {
 }
 
 function renderTrainerResult(result) {
+  if (result.street === "flop") {
+    renderFlopTrainerResult(result);
+    return;
+  }
   const rows = result.actions
     .map((action) => `
       <tr>
@@ -669,6 +756,42 @@ function renderTrainerResult(result) {
     <div class="table-wrap">
       <table>
         <thead><tr><th>Action</th><th>Frequency</th><th>EV</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderFlopTrainerResult(result) {
+  const rows = result.actions
+    .map((action) => `
+      <tr>
+        <td>${escapeHtml(action.name)}</td>
+        <td>${action.is_acceptable ? "Accepted" : ""}</td>
+        <td>${formatNumber(action.ev, 3)}</td>
+        <td>${formatNumber(action.score, 2)}</td>
+        <td>${escapeHtml(action.reason)}</td>
+        <td>${action.is_best ? "Best" : ""}</td>
+      </tr>
+    `)
+    .join("");
+  const accepted = (result.accepted_actions || []).map(escapeHtml).join(", ");
+  el("trainer-result").innerHTML = `
+    <div class="section-heading">
+      <h2>${result.is_correct ? "Correct" : "Review"} | Score ${result.score}</h2>
+    </div>
+    <p>${escapeHtml(result.feedback)}</p>
+    <div class="flop-result-grid">
+      <div><span class="metric-label">Board texture</span><strong>${escapeHtml(result.texture?.board_texture || "-")}</strong></div>
+      <div><span class="metric-label">Hero read</span><strong>${escapeHtml(result.texture?.summary || "-")}</strong></div>
+      <div><span class="metric-label">Equity</span><strong>${formatNumber(result.metrics?.equity, 1)}%</strong></div>
+      <div><span class="metric-label">Range advantage</span><strong>${escapeHtml(result.metrics?.range_advantage || "-")}</strong></div>
+      <div><span class="metric-label">Nut advantage</span><strong>${escapeHtml(result.metrics?.nut_advantage || "-")}</strong></div>
+      <div><span class="metric-label">Accepted</span><strong>${accepted || "-"}</strong></div>
+    </div>
+    <div class="table-wrap trainer-result-table">
+      <table>
+        <thead><tr><th>Action</th><th>Status</th><th>EV</th><th>Score</th><th>Reason</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
@@ -748,11 +871,23 @@ el("analyze-button").addEventListener("click", analyze);
 el("hand-filter").addEventListener("input", () => {
   if (state.studyData) renderHandsTable(state.studyData.range_grid);
 });
+el("trainer-street").addEventListener("change", () => {
+  updateTrainerControls();
+  state.trainerQuestion = null;
+  el("trainer-title").textContent = "No question loaded";
+  el("trainer-hand").textContent = "";
+  el("trainer-history").innerHTML = "";
+  el("trainer-actions").innerHTML = "";
+  el("trainer-result").innerHTML = "";
+  el("flop-summary").classList.add("hidden");
+  el("trainer-status").textContent = "";
+});
 el("new-question").addEventListener("click", loadTrainerQuestion);
 el("save-profile").addEventListener("click", saveStrategyProfile);
 
 renderHistory();
 syncAutoStateControls();
+updateTrainerControls();
 renderTableState();
 loadStrategyProfile();
 analyze();

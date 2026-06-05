@@ -247,12 +247,27 @@
     <section id="trainer-view" class="workspace hidden">
       <aside class="control-panel">
         <h2>Trainer</h2>
-        <label>Mode
+        <label>Street
+          <select id="trainer-street">
+            <option value="preflop">Preflop</option>
+            <option value="flop">Flop</option>
+          </select>
+        </label>
+        <label id="preflop-mode-label">Preflop mode
           <select id="trainer-mode">
             <option value="random">Random</option>
             <option value="facing_open">Facing Open</option>
             <option value="facing_3bet">Facing 3-bet</option>
             <option value="facing_4bet">Facing 4-bet</option>
+          </select>
+        </label>
+        <label id="flop-mode-label" class="hidden">Flop spot
+          <select id="flop-trainer-mode">
+            <option value="random">Random Flop</option>
+            <option value="single_raised_pot">Single-raised pot</option>
+            <option value="3_bet_pot">3-bet pot</option>
+            <option value="4_bet_pot">4-bet pot</option>
+            <option value="5_bet_pot">5-bet pot</option>
           </select>
         </label>
         <label>Simulations
@@ -265,6 +280,7 @@
         <div class="trainer-spot">
           <h2 id="trainer-title">No question loaded</h2>
           <p id="trainer-hand"></p>
+          <div id="flop-summary" class="flop-summary hidden"></div>
           <ol id="trainer-history" class="history-list"></ol>
           <div id="trainer-actions" class="trainer-actions"></div>
         </div>

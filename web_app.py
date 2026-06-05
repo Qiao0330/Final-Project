@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from flop_trainer_adapter import get_flop_trainer_question, grade_flop_trainer_answer
 from study_adapter import get_study_view_data
 from strategy_profile import load_strategy_profile, save_strategy_profile
 from trainer_adapter import get_trainer_question, grade_trainer_answer
@@ -44,6 +45,17 @@ class PokerUiHandler(BaseHTTPRequestHandler):
             if path == "/api/trainer/grade":
                 self._send_json(
                     grade_trainer_answer(
+                        str(payload.get("question_id", "")),
+                        str(payload.get("user_action", "")),
+                    )
+                )
+                return
+            if path == "/api/flop-trainer/question":
+                self._send_json(get_flop_trainer_question(payload))
+                return
+            if path == "/api/flop-trainer/grade":
+                self._send_json(
+                    grade_flop_trainer_answer(
                         str(payload.get("question_id", "")),
                         str(payload.get("user_action", "")),
                     )
