@@ -19,8 +19,8 @@
   <main class="app-shell">
     <header class="topbar">
       <div>
-        <h1>Preflop GTO Study</h1>
-        <p>Six-max decision builder with range frequency and EV matrix.</p>
+        <h1>Preflop GTO Lab</h1>
+        <p>Six-max range matrix, EV breakdown, and trainer review.</p>
       </div>
       <nav class="tabs" aria-label="Mode tabs">
         <button class="tab-button active" data-mode="study">Study</button>
@@ -136,7 +136,7 @@
       <section class="main-panel">
         <section class="table-builder">
           <div class="section-heading">
-            <h2>Action Line Builder</h2>
+            <h2>Table State</h2>
             <div class="seat-action-controls">
               <span id="node-status" class="node-status">Open</span>
               <input id="seat-action-amount" class="hidden" type="number" value="0" min="0" step="0.5" aria-label="Seat action amount">
@@ -200,6 +200,10 @@
             <span class="metric-label">Raise</span>
             <strong id="summary-raise">-</strong>
           </div>
+          <div>
+            <span class="metric-label">All-in</span>
+            <strong id="summary-allin">-</strong>
+          </div>
         </div>
 
         <div class="range-layout">
@@ -210,6 +214,7 @@
                 <span class="legend-item fold">Fold</span>
                 <span class="legend-item call">Call/Check</span>
                 <span class="legend-item raise">Raise</span>
+                <span class="legend-item all-in">All-in</span>
               </div>
             </div>
             <div id="range-grid" class="range-grid" aria-label="169 hand class matrix"></div>
@@ -226,7 +231,7 @@
 
         <section class="table-panel">
           <div class="section-heading">
-            <h2>All Hands</h2>
+            <h2>Hand List</h2>
             <input id="hand-filter" placeholder="Filter hand, action, EV">
           </div>
           <div class="table-wrap">
@@ -243,6 +248,8 @@
                   <th>EV Call/Check</th>
                   <th>Raise</th>
                   <th>EV Raise</th>
+                  <th>All-in</th>
+                  <th>EV All-in</th>
                   <th>Raise Sizes</th>
                 </tr>
               </thead>
@@ -255,7 +262,7 @@
 
     <section id="trainer-view" class="workspace hidden">
       <aside class="control-panel">
-        <h2>Trainer</h2>
+        <h2>Coach Mode</h2>
         <label>Street
           <select id="trainer-street">
             <option value="preflop">Preflop</option>

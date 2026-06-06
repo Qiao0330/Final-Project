@@ -13,6 +13,7 @@
   --call: #6fb36b;
   --raise: #df4b45;
   --cyan: #58a7a4;
+  --all-in: #8e68e8;
 }
 
 * {
@@ -152,6 +153,15 @@ h1 {
 @keyframes loading-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes loading-sweep {
+  0% {
+    background-position: 220% 0;
+  }
+  100% {
+    background-position: -220% 0;
   }
 }
 
@@ -605,7 +615,7 @@ button {
 
 .summary-band {
   display: grid;
-  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
   gap: 1px;
   border-bottom: 1px solid var(--line);
   background: var(--line);
@@ -690,6 +700,10 @@ button {
   background: var(--raise);
 }
 
+.legend-item.all-in {
+  background: var(--all-in);
+}
+
 .range-grid {
   display: grid;
   grid-template-columns: repeat(13, minmax(42px, 1fr));
@@ -711,7 +725,8 @@ button {
       90deg,
       var(--fold) 0 var(--fold-pct),
       var(--call) var(--fold-pct) var(--call-pct),
-      var(--raise) var(--call-pct) 100%
+      var(--raise) var(--call-pct) var(--raise-pct),
+      var(--all-in) var(--raise-pct) 100%
     );
 }
 
@@ -749,6 +764,26 @@ button {
 
 .freq-segment.raise {
   background: var(--raise);
+}
+
+.freq-segment.all-in {
+  background: var(--all-in);
+}
+
+.range-pending {
+  grid-column: 1 / -1;
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed rgba(210, 168, 79, 0.35);
+  border-radius: 8px;
+  color: var(--muted);
+  background:
+    linear-gradient(90deg, transparent, rgba(210, 168, 79, 0.10), transparent),
+    #0e1015;
+  background-size: 220% 100%;
+  animation: loading-sweep 1.35s ease-in-out infinite;
+  font-weight: 800;
 }
 
 .detail-panel dl {
@@ -1011,5 +1046,307 @@ th {
 @media (prefers-reduced-motion: reduce) {
   .loading-spinner {
     animation: none;
+  }
+}
+
+/* GTO Wizard + Coach restyle */
+body {
+  background:
+    linear-gradient(180deg, rgba(210, 168, 79, 0.07), transparent 260px),
+    radial-gradient(circle at 50% -18%, rgba(79, 127, 180, 0.22), transparent 34%),
+    #08090b;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  padding: 14px 18px;
+  background: rgba(10, 11, 14, 0.94);
+  backdrop-filter: blur(14px);
+}
+
+h1 {
+  font-size: 21px;
+}
+
+.tabs {
+  gap: 4px;
+  border-radius: 8px;
+  padding: 4px;
+  background: #0d0f13;
+}
+
+.tab-button {
+  min-width: 104px;
+  height: 34px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.tab-button.active {
+  color: #08090b;
+  background: linear-gradient(180deg, #f6cf7b, var(--gold));
+}
+
+.workspace {
+  grid-template-columns: 380px minmax(0, 1fr);
+}
+
+.control-panel {
+  gap: 16px;
+  padding: 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 280px),
+    #111318;
+}
+
+.main-panel {
+  background: #0b0d11;
+}
+
+input,
+select,
+.compact-button,
+.secondary-button {
+  background: #0c0e12;
+}
+
+.primary-button {
+  color: #08090b;
+  background: linear-gradient(180deg, #f6cf7b, var(--gold));
+}
+
+.action-builder,
+.detail-panel {
+  border-radius: 8px;
+  background: #0e1015;
+}
+
+.action-builder {
+  border: 1px solid var(--line);
+  padding: 12px;
+}
+
+.history-list li {
+  background: #151820;
+}
+
+.table-builder {
+  padding: 18px 28px 34px;
+  background:
+    linear-gradient(180deg, rgba(88, 167, 164, 0.08), transparent),
+    #0e1116;
+}
+
+.poker-table {
+  min-height: 400px;
+  border-color: #31594d;
+  background:
+    radial-gradient(circle at center, rgba(111, 179, 107, 0.20), rgba(11, 13, 17, 0.12) 55%),
+    linear-gradient(145deg, #173f34, #0f231e);
+  box-shadow: inset 0 0 70px rgba(0, 0, 0, 0.45);
+}
+
+.seat {
+  border-color: #434a56;
+  background: #11151c;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+}
+
+.seat-header strong {
+  color: var(--green);
+}
+
+.seat.hero-seat,
+.seat.study-seat {
+  box-shadow: 0 0 0 2px rgba(210, 168, 79, 0.26), 0 14px 34px rgba(0, 0, 0, 0.34);
+}
+
+.felt-center {
+  background: rgba(8, 9, 11, 0.66);
+}
+
+.summary-band > div {
+  background: #101319;
+}
+
+.summary-band strong {
+  color: var(--text);
+}
+
+.section-heading h2,
+.section-heading h3 {
+  letter-spacing: 0;
+}
+
+.range-area {
+  background: #0b0d11;
+}
+
+.range-grid {
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px;
+  background: #050607;
+}
+
+.hand-cell {
+  border-color: rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+}
+
+.hand-cell.selected {
+  box-shadow: 0 0 0 4px rgba(210, 168, 79, 0.16);
+}
+
+.hand-cell .hand-name {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.detail-panel h2 {
+  color: var(--gold);
+}
+
+.opponent-panel {
+  background: #0d1015;
+}
+
+.opponent-card,
+.flop-summary > div,
+.flop-result-grid > div {
+  background: #151922;
+}
+
+.table-wrap {
+  border-radius: 8px;
+  background: #0c0e12;
+}
+
+th,
+td {
+  border-bottom-color: #242a33;
+}
+
+th {
+  background: #161a22;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.trainer-spot {
+  border-bottom: 1px solid var(--line);
+  background:
+    linear-gradient(135deg, rgba(210, 168, 79, 0.12), transparent 34%),
+    #101319;
+}
+
+.trainer-spot h2 {
+  color: var(--gold);
+  font-size: 24px;
+}
+
+#trainer-hand {
+  margin-top: 8px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.trainer-actions button {
+  font-weight: 800;
+}
+
+.trainer-actions button:nth-child(1) {
+  background: var(--fold);
+}
+
+.trainer-actions button:nth-child(2) {
+  background: var(--call);
+  color: #071008;
+}
+
+.trainer-actions button:nth-child(n+3) {
+  background: var(--raise);
+}
+
+#trainer-result .section-heading h2 {
+  color: var(--gold);
+}
+
+#trainer-result p {
+  max-width: 960px;
+  margin-bottom: 14px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.trainer-result-table,
+#trainer-result .table-wrap {
+  border-color: #3a4150;
+}
+
+.metric-label {
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.status-line {
+  min-height: 16px;
+}
+
+.trainer-actions button:hover,
+.seat-line-action:hover,
+.compact-button:hover,
+.secondary-button:hover,
+.icon-button:hover {
+  filter: brightness(1.12);
+}
+
+#trainer-result {
+  background: #0d1015;
+}
+
+@media (max-width: 980px) {
+  .workspace,
+  .range-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .control-panel,
+  .detail-panel {
+    border-right: 0;
+    border-left: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .poker-table {
+    min-height: 440px;
+  }
+}
+
+@media (max-width: 640px) {
+  .topbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .summary-band {
+    grid-template-columns: 1fr;
+  }
+
+  .poker-table {
+    min-height: 470px;
+    border-radius: 24px;
+  }
+
+  .seat {
+    width: 118px;
+    min-height: 114px;
+  }
+
+  .range-grid {
+    grid-template-columns: repeat(13, minmax(28px, 1fr));
   }
 }

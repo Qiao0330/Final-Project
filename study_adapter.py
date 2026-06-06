@@ -161,6 +161,7 @@ def get_study_view_data(request: dict) -> dict:
             "ev_check": selected_evs.get("Check", 0.0),
             "ev_call": selected_evs.get("Call", 0.0),
             "ev_raise": selected_evs.get("Raise", 0.0),
+            "ev_all_in": selected_evs.get("All-in", 0.0),
             "equity_source": "range-aware Monte Carlo",
         },
         "explanation": node_explanation,
@@ -189,7 +190,10 @@ def _actions_from_grid_item(item: dict) -> list[dict]:
                     "frequency": option["frequency"],
                     "ev": option["ev"],
                     "combos": None,
-                    "is_recommended": item["recommended"] == "Raise" and option["is_best"],
+                    "is_recommended": (
+                        (item["recommended"] == "Raise" and option["label"].startswith("Raise") and option["is_best"])
+                        or (item["recommended"] == "All-in" and option["label"].startswith("All-in") and option["is_best"])
+                    ),
                 }
             )
     elif "Raise" in item["actions"]:
@@ -200,6 +204,16 @@ def _actions_from_grid_item(item: dict) -> list[dict]:
                 "ev": item["evs"].get("Raise", 0.0),
                 "combos": None,
                 "is_recommended": item["recommended"] == "Raise",
+            }
+        )
+    if "All-in" in item["actions"] and not item.get("raise_options"):
+        actions.append(
+            {
+                "name": "All-in",
+                "frequency": item["actions"].get("All-in", 0.0),
+                "ev": item["evs"].get("All-in", 0.0),
+                "combos": None,
+                "is_recommended": item["recommended"] == "All-in",
             }
         )
     return actions
@@ -245,7 +259,7 @@ def _range_grid(
                     board_cards=board_cards,
                 )
             ).equity
-        raise_amounts = candidate_raise_amounts or (raise_amount_bb,)
+        raise_amounts = tuple(amount for amount in (candidate_raise_amounts or (raise_amount_bb,)) if amount > current_bet)
         action_values, _, _ = _preflop_action_profile(
             hero_position,
             hand_class,
@@ -254,6 +268,13 @@ def _range_grid(
             pot_bb,
             raise_amounts,
         )
+        if not raise_amounts:
+            action_values.pop("Raise", None)
+            action_values.pop("All-in", None)
+        if not any(not _is_all_in_total(amount) for amount in raise_amounts):
+            action_values.pop("Raise", None)
+        if not any(_is_all_in_total(amount) for amount in raise_amounts):
+            action_values.pop("All-in", None)
         evs, raise_options = _action_evs_from_equity(
             action_values,
             equity,
@@ -308,14 +329,10 @@ def _action_evs_from_equity(
     if "Check" in actions:
         evs["Check"] = equity * pot_bb
     if "Call" in actions:
-        call_frequency = actions.get("Call", 0.0) / 100.0
-        evs["Call"] = (
-            equity * (pot_bb + call_amount_bb)
-            - call_amount_bb
-            - (1.0 - call_frequency) * call_amount_bb * 0.50
-        )
+        evs["Call"] = equity * (pot_bb + call_amount_bb) - call_amount_bb
 
     raise_evs: dict[str, float] = {}
+    all_in_evs: dict[str, float] = {}
     for raise_total in raise_amounts:
         if raise_total <= current_bet:
             continue
@@ -337,14 +354,20 @@ def _action_evs_from_equity(
             fold_probability * pot_bb
             + (1.0 - fold_probability) * (called_equity * final_pot - hero_investment)
         )
-        raise_frequency = actions.get("Raise", 0.0) / 100.0
-        raise_evs[_raise_label(raise_total)] = (
-            raw_raise_ev
-            - (1.0 - raise_frequency) * hero_investment * 0.55
-        )
+        label = _raise_label(raise_total)
+        if _is_all_in_total(raise_total):
+            all_in_evs[label] = raw_raise_ev
+        else:
+            raise_evs[label] = raw_raise_ev
     if "Raise" in actions:
-        evs["Raise"] = max(raise_evs.values(), default=-999.0)
-    return evs, _raise_options(raise_evs, actions.get("Raise", 0.0))
+        evs["Raise"] = max(raise_evs.values(), default=-999.0) if actions.get("Raise", 0.0) > 0.0 else -999.0
+    if "All-in" in actions:
+        evs["All-in"] = max(all_in_evs.values(), default=-999.0) if actions.get("All-in", 0.0) > 0.0 else -999.0
+    raise_options = [
+        *_raise_options(raise_evs, actions.get("Raise", 0.0)),
+        *_raise_options(all_in_evs, actions.get("All-in", 0.0)),
+    ]
+    return evs, raise_options
 
 
 def _preflop_action_profile(
@@ -565,42 +588,53 @@ def _facing_four_bet_action_profile(
     raise_threshold = 82
     call_threshold = 80
 
+    has_all_in = any(_is_all_in_total(amount) for amount in raise_amounts)
     if score >= 87:
-        raise_frequency = 75.0
+        total_aggression = 88.0
     elif score >= 84:
-        raise_frequency = 45.0
+        total_aggression = 62.0
     elif score >= 82:
-        raise_frequency = 25.0
+        total_aggression = 34.0
     else:
-        raise_frequency = 0.0
+        total_aggression = 0.0
+
+    if has_all_in:
+        all_in_frequency = min(total_aggression, 65.0 if score >= 87 else 38.0 if score >= 84 else 16.0)
+        raise_frequency = max(0.0, total_aggression - all_in_frequency)
+    else:
+        all_in_frequency = 0.0
+        raise_frequency = total_aggression
 
     if score >= 84:
-        call_frequency = max(0.0, 100.0 - raise_frequency)
+        call_frequency = max(0.0, 100.0 - raise_frequency - all_in_frequency)
     elif score >= 80:
-        call_frequency = max(0.0, 45.0 - raise_frequency * 0.35)
+        call_frequency = max(0.0, 45.0 - (raise_frequency + all_in_frequency) * 0.35)
     elif score >= 77:
-        call_frequency = max(0.0, 20.0 - raise_frequency * 0.25)
+        call_frequency = max(0.0, 20.0 - (raise_frequency + all_in_frequency) * 0.25)
     else:
         call_frequency = 0.0
 
-    fold_frequency = max(0.0, 100.0 - call_frequency - raise_frequency)
+    fold_frequency = max(0.0, 100.0 - call_frequency - raise_frequency - all_in_frequency)
     pot_odds = call_amount_bb / max(0.01, pot_bb + call_amount_bb)
     evs = {
         "Fold": 0.0,
         "Call": (score - call_threshold) / 13.0 - pot_odds * 0.12,
         "Raise": _best_raise_ev(score, raise_threshold, pot_bb, raise_amounts),
+        "All-in": _best_all_in_ev(score, raise_threshold, pot_bb, raise_amounts),
     }
     actions = {
         "Fold": fold_frequency,
         "Call": call_frequency,
         "Raise": raise_frequency,
     }
+    if has_all_in:
+        actions["All-in"] = all_in_frequency
     return actions, evs, _raise_options_from_score(
         score,
         raise_threshold,
         pot_bb,
         raise_amounts,
-        raise_frequency,
+        raise_frequency + all_in_frequency,
     )
 
 
@@ -888,10 +922,25 @@ def _call_frequency_from_threshold(score: int, threshold: int, raise_frequency: 
 
 
 def _best_raise_ev(score: int, threshold: int, pot_bb: float, raise_amounts: tuple[float, ...]) -> float:
-    raise_evs = _raise_option_evs_from_score(score, threshold, pot_bb, raise_amounts)
+    raise_evs = {
+        label: ev
+        for label, ev in _raise_option_evs_from_score(score, threshold, pot_bb, raise_amounts).items()
+        if not label.startswith("All-in")
+    }
     if not raise_evs:
         return -999.0
     return max(raise_evs.values())
+
+
+def _best_all_in_ev(score: int, threshold: int, pot_bb: float, raise_amounts: tuple[float, ...]) -> float:
+    all_in_evs = {
+        label: ev
+        for label, ev in _raise_option_evs_from_score(score, threshold, pot_bb, raise_amounts).items()
+        if label.startswith("All-in")
+    }
+    if not all_in_evs:
+        return -999.0
+    return max(all_in_evs.values())
 
 
 def _raise_option_evs_from_score(score: int, threshold: int, pot_bb: float, raise_amounts: tuple[float, ...]) -> dict[str, float]:
@@ -939,6 +988,8 @@ def _raise_options_from_base_ev(
 
 
 def _raise_options(raise_evs: dict[str, float], total_raise_frequency: float) -> list[dict]:
+    if total_raise_frequency <= 0.0:
+        return []
     frequencies = mixed_frequencies_from_named_evs(raise_evs)
     best_label = _best_raise_label(raise_evs)
     return [
@@ -960,7 +1011,13 @@ def _best_raise_label(raise_evs: dict[str, float]) -> str:
 
 
 def _raise_label(amount: float) -> str:
+    if _is_all_in_total(amount):
+        return f"All-in {amount:.1f}"
     return f"Raise {amount:.1f}"
+
+
+def _is_all_in_total(amount: float) -> bool:
+    return amount >= 99.0
 
 
 def _range_simulations(simulations: int, request: dict) -> int:
@@ -972,21 +1029,53 @@ def _range_simulations(simulations: int, request: dict) -> int:
 
 def _auto_raise_amounts(hero_position, action_history, current_bet: float) -> tuple[float, ...]:
     raise_count = sum(1 for record in action_history if record.action == Action.RAISE)
+    oop = _is_postflop_oop(hero_position, action_history)
     if raise_count == 0:
         if hero_position == Position.SB:
             return (3.5,)
         return (2.5,)
     if raise_count == 1:
-        multiplier = 4.0 if hero_position in (Position.SB, Position.BB) else 3.0
+        multiplier = 4.0 if oop else 3.0
         main_size = max(current_bet + 1.0, current_bet * multiplier)
         small_size = max(current_bet + 1.0, current_bet * (multiplier - 0.5))
         return tuple(sorted({round(min(100.0, small_size), 1), round(min(100.0, main_size), 1)}))
-    main_size = max(current_bet + 1.0, current_bet * 2.25)
-    jam_size = 100.0 if current_bet >= 12.0 else 0.0
+    if raise_count == 2:
+        multiplier = 2.65 if oop else 2.35
+        main_size = max(current_bet + 1.0, current_bet * multiplier)
+        sizes = {round(min(100.0, main_size), 1)}
+        if current_bet >= 9.0:
+            sizes.add(100.0)
+        return tuple(sorted(sizes))
+    multiplier = 2.35 if oop else 2.15
+    main_size = max(current_bet + 1.0, current_bet * multiplier)
     sizes = {round(min(100.0, main_size), 1)}
-    if jam_size:
-        sizes.add(jam_size)
+    if current_bet >= 12.0:
+        sizes.add(100.0)
     return tuple(sorted(sizes))
+
+
+def _is_postflop_oop(hero_position: Position, action_history) -> bool:
+    active_opponents = []
+    folded = {
+        record.position
+        for record in action_history
+        if record.action == Action.FOLD
+    }
+    for record in action_history:
+        if record.position != hero_position and record.position not in folded and record.action in (Action.CALL, Action.RAISE, Action.CHECK):
+            active_opponents.append(record.position)
+    if not active_opponents:
+        return hero_position in (Position.SB, Position.BB)
+    order = {
+        Position.SB: 0,
+        Position.BB: 1,
+        Position.UTG: 2,
+        Position.HJ: 3,
+        Position.CO: 4,
+        Position.BTN: 5,
+    }
+    hero_order = order.get(hero_position, 0)
+    return any(hero_order < order.get(position, 0) for position in set(active_opponents))
 
 
 def _candidate_raise_amounts(request: dict, fallback_raise_amount: float) -> tuple[float, ...]:

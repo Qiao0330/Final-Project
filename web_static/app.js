@@ -1,4 +1,5 @@
 const SEATS = ["UTG", "HJ", "CO", "BTN", "SB", "BB"];
+const EFFECTIVE_STACK_BB = 100;
 
 const state = {
   history: [],
@@ -8,6 +9,8 @@ const state = {
   strategyProfile: null,
   trainerQuestion: null,
   loadingCount: 0,
+  analysisRequestId: 0,
+  analysisPending: false,
 };
 
 const el = (id) => document.getElementById(id);
@@ -57,6 +60,87 @@ function countRaises() {
   return state.history.filter((record) => record.action === "raise").length;
 }
 
+function deriveClientPreflopState(history = state.history) {
+  const contributions = Object.fromEntries(SEATS.map((seat) => [seat, 0]));
+  contributions.SB = 0.5;
+  contributions.BB = 1.0;
+  const folded = new Set();
+  let acted = new Set();
+  let currentBet = 1.0;
+  let lastRaiseIncrement = 1.0;
+  let lastActor = null;
+
+  history.forEach((record) => {
+    const seat = record.position;
+    if (!SEATS.includes(seat) || folded.has(seat)) return;
+    if (record.action === "fold") {
+      folded.add(seat);
+      acted.add(seat);
+      lastActor = seat;
+      return;
+    }
+    if (record.action === "check") {
+      acted.add(seat);
+      lastActor = seat;
+      return;
+    }
+    if (record.action === "call") {
+      const toCall = Math.max(0, currentBet - contributions[seat]);
+      contributions[seat] += Math.min(toCall, EFFECTIVE_STACK_BB - contributions[seat]);
+      acted.add(seat);
+      lastActor = seat;
+      return;
+    }
+    if (record.action === "raise") {
+      const newTotal = Math.min(Number(record.amount || 0), EFFECTIVE_STACK_BB);
+      if (newTotal <= currentBet) return;
+      const raiseIncrement = Math.max(0, newTotal - currentBet);
+      contributions[seat] = newTotal;
+      currentBet = newTotal;
+      if (raiseIncrement > 0) {
+        lastRaiseIncrement = raiseIncrement;
+      }
+      acted = new Set([seat]);
+      lastActor = seat;
+    }
+  });
+
+  const nextToAct = nextClientPositionToAct(folded, contributions, currentBet, acted, lastActor);
+  return {
+    contributions,
+    folded,
+    acted,
+    currentBet,
+    lastRaiseIncrement,
+    lastActor,
+    nextToAct,
+    minRaiseTotal: Math.min(EFFECTIVE_STACK_BB, currentBet + Math.max(1.0, lastRaiseIncrement)),
+  };
+}
+
+function clientBettingClosed(folded, contributions, currentBet, acted) {
+  const activeSeats = SEATS.filter((seat) => !folded.has(seat));
+  if (activeSeats.length <= 1) return true;
+  return activeSeats.every((seat) => (
+    contributions[seat] >= EFFECTIVE_STACK_BB
+    || (contributions[seat] >= currentBet && acted.has(seat))
+  ));
+}
+
+function nextClientPositionToAct(folded, contributions, currentBet, acted, afterPosition = null) {
+  if (clientBettingClosed(folded, contributions, currentBet, acted)) return null;
+  const startIndex = afterPosition ? (SEATS.indexOf(afterPosition) + 1) % SEATS.length : 0;
+  for (let offset = 0; offset < SEATS.length; offset += 1) {
+    const seat = SEATS[(startIndex + offset) % SEATS.length];
+    if (folded.has(seat)) continue;
+    if (contributions[seat] >= EFFECTIVE_STACK_BB) continue;
+    if (contributions[seat] < currentBet || !acted.has(seat)) {
+      return seat;
+    }
+  }
+  return null;
+}
+
 function currentStudyPosition() {
   return state.studyPosition || state.studyData?.betting_state?.next_to_act || "UTG";
 }
@@ -73,6 +157,7 @@ function autoRaiseAmount(seat, action = "raise") {
   const bettingState = state.studyData?.betting_state;
   const currentBet = Number(bettingState?.current_bet_bb || 1);
   const raiseCount = countRaises();
+  const oop = isPostflopOop(seat);
   if (action === "all-in") {
     return Number(bettingState?.max_raise_total_bb || 100);
   }
@@ -80,10 +165,33 @@ function autoRaiseAmount(seat, action = "raise") {
     return seat === "SB" ? 3.5 : 2.5;
   }
   if (raiseCount === 1) {
-    const multiplier = seat === "SB" || seat === "BB" ? 4.0 : 3.0;
+    const multiplier = oop ? 4.0 : 3.0;
     return Math.min(100, Math.max(currentBet + 1, currentBet * multiplier));
   }
-  return Math.min(100, Math.max(currentBet + 1, currentBet * 2.25));
+  if (raiseCount === 2) {
+    const multiplier = oop ? 2.65 : 2.35;
+    return Math.min(100, Math.max(currentBet + 1, currentBet * multiplier));
+  }
+  const multiplier = oop ? 2.35 : 2.15;
+  return Math.min(100, Math.max(currentBet + 1, currentBet * multiplier));
+}
+
+function isPostflopOop(seat) {
+  const postflopOrder = { SB: 0, BB: 1, UTG: 2, HJ: 3, CO: 4, BTN: 5 };
+  const folded = new Set(
+    state.history
+      .filter((record) => record.action === "fold")
+      .map((record) => record.position)
+  );
+  const activeOpponents = state.history
+    .filter((record) => record.position !== seat && !folded.has(record.position))
+    .filter((record) => ["call", "raise", "check"].includes(record.action))
+    .map((record) => record.position);
+  if (activeOpponents.length === 0) {
+    return seat === "SB" || seat === "BB";
+  }
+  const heroOrder = postflopOrder[seat] ?? 0;
+  return [...new Set(activeOpponents)].some((position) => heroOrder < (postflopOrder[position] ?? 0));
 }
 
 async function postJson(url, payload) {
@@ -141,6 +249,8 @@ function renderHistory() {
     remove.addEventListener("click", () => {
       state.history.splice(index, 1);
       setStudyPosition(inferNextSeatAfterHistory());
+      state.studyData = null;
+      state.analysisPending = true;
       renderHistory();
       analyze();
     });
@@ -175,20 +285,45 @@ function buildStudyPayload() {
 }
 
 async function analyze() {
+  const requestId = ++state.analysisRequestId;
+  state.analysisPending = true;
+  renderStudyPending();
   el("status-line").textContent = "Analyzing...";
   showLoading("Calculating range matrix and EV...");
   try {
     const data = await postJson("/api/study", buildStudyPayload());
+    if (requestId !== state.analysisRequestId) {
+      return;
+    }
     state.studyData = data;
+    state.analysisPending = false;
     setStudyPosition(data.betting_state?.next_to_act || data.hero_position || currentStudyPosition());
     state.selectedHand = data.range_grid.find((item) => item.is_selected) || data.range_grid[0];
     renderStudy(data);
     el("status-line").textContent = `Loaded ${data.range_grid.length} hand classes with ${data.range_simulations} range sims each against ${data.opponent_ranges.length} opponent ranges.`;
   } catch (error) {
-    el("status-line").textContent = error.message;
+    if (requestId === state.analysisRequestId) {
+      state.analysisPending = false;
+      el("status-line").textContent = error.message;
+      renderTableState();
+    }
   } finally {
     hideLoading();
   }
+}
+
+function renderStudyPending() {
+  renderRangeSummary([]);
+  el("range-grid").innerHTML = `<div class="range-pending">Solving range matrix...</div>`;
+  el("detail-hand").textContent = "Solving...";
+  el("detail-stats").innerHTML = `
+    <dt>Status</dt><dd>Calculating</dd>
+    <dt>Viewing</dt><dd>${currentStudyPosition()}</dd>
+  `;
+  el("hands-table").innerHTML = `<tr><td colspan="13">Calculating hand list...</td></tr>`;
+  el("opponent-summary").textContent = "Solving ranges";
+  el("opponent-ranges").innerHTML = `<p class="status-line">Inferring opponent ranges...</p>`;
+  renderTableState();
 }
 
 function renderStudy(data) {
@@ -250,6 +385,7 @@ function rangeActionSummary(items) {
     fold: 0,
     call: 0,
     raise: 0,
+    allin: 0,
     combos: 0,
   };
   items.forEach((item) => {
@@ -258,6 +394,7 @@ function rangeActionSummary(items) {
     totals.fold += frequencies.fold * combos;
     totals.call += frequencies.call * combos;
     totals.raise += frequencies.raise * combos;
+    totals.allin += frequencies.allin * combos;
     totals.combos += combos;
   });
   const divisor = Math.max(1, totals.combos);
@@ -265,6 +402,7 @@ function rangeActionSummary(items) {
     fold: totals.fold / divisor,
     call: totals.call / divisor,
     raise: totals.raise / divisor,
+    allin: totals.allin / divisor,
     combos: totals.combos,
   };
 }
@@ -275,6 +413,7 @@ function renderRangeSummary(items) {
   el("summary-fold").textContent = `${formatNumber(summary.fold, 1)}%`;
   el("summary-call").textContent = `${formatNumber(summary.call, 1)}%`;
   el("summary-raise").textContent = `${formatNumber(summary.raise, 1)}%`;
+  el("summary-allin").textContent = `${formatNumber(summary.allin, 1)}%`;
 }
 
 async function loadStrategyProfile() {
@@ -365,6 +504,7 @@ function renderTableState() {
   const street = el("street").value;
   const boardCards = el("board-cards").value.trim();
   const bettingState = state.studyData?.betting_state;
+  const pending = state.analysisPending;
   const isClosed = Boolean(bettingState?.is_closed);
   const latestBySeat = {};
   state.history.forEach((record) => {
@@ -376,7 +516,7 @@ function renderTableState() {
     const record = latestBySeat[seat];
     const seatState = bettingState?.seats?.[seat];
     seatNode.classList.remove("hero-seat", "study-seat", "seat-state-fold", "seat-state-call", "seat-state-raise", "seat-state-check", "seat-can-act", "seat-disabled");
-    seatNode.classList.toggle("seat-disabled", isClosed || (Boolean(bettingState) && !seatState?.can_act));
+    seatNode.classList.toggle("seat-disabled", pending || isClosed || (Boolean(bettingState) && !seatState?.can_act));
     if (seat === studyPosition) {
       seatNode.classList.add("study-seat");
     }
@@ -397,7 +537,7 @@ function renderTableState() {
     } else {
       stateLabel.textContent = "empty";
     }
-    renderSeatActions(seat, seatState, isClosed);
+    renderSeatActions(seat, seatState, pending || isClosed);
   });
   el("table-pot").textContent = `${formatNumber(el("pot-bb").value, 1)} BB`;
   el("table-board").textContent = boardCards ? `${street} ${boardCards}` : `${street} board -`;
@@ -405,10 +545,12 @@ function renderTableState() {
   const minRaise = state.studyData?.betting_state?.min_raise_total_bb;
   const maxRaise = state.studyData?.betting_state?.max_raise_total_bb;
   const suggestedSizes = state.studyData?.candidate_raise_amounts || [];
-  el("node-status").textContent = isClosed ? "Node closed" : "Open node";
-  el("node-status").classList.toggle("closed", isClosed);
-  document.querySelector(".poker-table").classList.toggle("closed-node", isClosed);
-  el("table-hero").textContent = isClosed
+  el("node-status").textContent = pending ? "Solving" : isClosed ? "Node closed" : "Open node";
+  el("node-status").classList.toggle("closed", pending || isClosed);
+  document.querySelector(".poker-table").classList.toggle("closed-node", pending || isClosed);
+  el("table-hero").textContent = pending
+    ? `Viewing ${studyPosition} | Solving...`
+    : isClosed
     ? `Viewing ${studyPosition} | Analysis locked`
     : nextToAct
     ? `Viewing ${studyPosition} | Next ${nextToAct}`
@@ -475,6 +617,8 @@ function appendSeatAction(seat, action) {
     amount: amount,
   });
   setStudyPosition(inferNextSeatAfterHistory());
+  state.studyData = null;
+  state.analysisPending = true;
   renderHistory();
   analyze();
 }
@@ -518,9 +662,8 @@ function buildHistoryToSeatDecision(seat) {
 }
 
 function inferNextSeatAfterHistory() {
-  if (state.history.length === 0) return "UTG";
-  const actedSeats = new Set(state.history.map((record) => record.position));
-  return SEATS.find((seat) => !actedSeats.has(seat)) || currentStudyPosition();
+  const nextToAct = deriveClientPreflopState().nextToAct;
+  return nextToAct || currentStudyPosition();
 }
 
 function selectStudySeat(seat) {
@@ -533,6 +676,8 @@ function selectStudySeat(seat) {
   } else if (!hasOpenHistory || seat !== currentNextToAct) {
     state.history = buildHistoryToSeatDecision(seat);
   }
+  state.studyData = null;
+  state.analysisPending = true;
   renderHistory();
   analyze();
 }
@@ -549,14 +694,16 @@ function renderRangeGrid(items) {
     cell.style.setProperty("--fold-pct", `${frequencies.fold}%`);
     cell.style.setProperty("--call-pct", `${frequencies.fold + frequencies.call}%`);
     cell.style.setProperty("--raise-pct", `${frequencies.fold + frequencies.call + frequencies.raise}%`);
+    cell.style.setProperty("--allin-pct", `${frequencies.fold + frequencies.call + frequencies.raise + frequencies.allin}%`);
     cell.innerHTML = `
       <span class="hand-name">${item.hand}</span>
       <span class="freq-strip" aria-hidden="true">
         <span class="freq-segment fold" style="width:${frequencies.fold}%"></span>
         <span class="freq-segment call" style="width:${frequencies.call}%"></span>
         <span class="freq-segment raise" style="width:${frequencies.raise}%"></span>
+        <span class="freq-segment all-in" style="width:${frequencies.allin}%"></span>
       </span>
-      <span class="hand-meta">R ${formatNumber(frequencies.raise, 0)} C ${formatNumber(frequencies.call, 0)} F ${formatNumber(frequencies.fold, 0)}</span>
+      <span class="hand-meta">AI ${formatNumber(frequencies.allin, 0)} R ${formatNumber(frequencies.raise, 0)} C ${formatNumber(frequencies.call, 0)} F ${formatNumber(frequencies.fold, 0)}</span>
     `;
     cell.addEventListener("click", () => {
       state.selectedHand = item;
@@ -573,11 +720,13 @@ function rangeActionFrequencies(item) {
   const fold = Number(item.actions.Fold || 0);
   const call = Number(item.actions.Call || item.actions.Check || 0);
   const raise = Number(item.actions.Raise || 0);
-  const total = Math.max(1, fold + call + raise);
+  const allin = Number(item.actions["All-in"] || 0);
+  const total = Math.max(1, fold + call + raise + allin);
   return {
     fold: fold / total * 100,
     call: call / total * 100,
     raise: raise / total * 100,
+    allin: allin / total * 100,
   };
 }
 
@@ -596,6 +745,8 @@ function renderDetail(item) {
     ["EV Call/Check", formatNumber(item.evs.Call ?? item.evs.Check, 3)],
     ["Raise", `${formatNumber(item.actions.Raise || 0, 1)}%`],
     ["EV Raise", formatNumber(item.evs.Raise, 3)],
+    ["All-in", `${formatNumber(item.actions["All-in"] || 0, 1)}%`],
+    ["EV All-in", formatNumber(item.evs["All-in"], 3)],
     ["Raise Sizes", formatRaiseOptions(item.raise_options)],
   ];
   el("detail-stats").innerHTML = rows
@@ -625,6 +776,8 @@ function renderHandsTable(items) {
         <td>${formatNumber(item.evs.Call ?? item.evs.Check, 3)}</td>
         <td>${formatNumber(item.actions.Raise || 0, 1)}%</td>
         <td>${formatNumber(item.evs.Raise, 3)}</td>
+        <td>${formatNumber(item.actions["All-in"] || 0, 1)}%</td>
+        <td>${formatNumber(item.evs["All-in"], 3)}</td>
         <td>${formatRaiseOptions(item.raise_options)}</td>
       `;
       tbody.appendChild(row);
@@ -842,6 +995,8 @@ el("add-action").addEventListener("click", () => {
     amount: Number(el("history-amount").value),
   });
   setStudyPosition(inferNextSeatAfterHistory());
+  state.studyData = null;
+  state.analysisPending = true;
   renderHistory();
   analyze();
 });
@@ -849,6 +1004,8 @@ el("add-action").addEventListener("click", () => {
 el("clear-actions").addEventListener("click", () => {
   state.history = [];
   setStudyPosition("UTG");
+  state.studyData = null;
+  state.analysisPending = true;
   renderHistory();
   analyze();
 });
@@ -867,10 +1024,12 @@ document.querySelector(".poker-table").addEventListener("click", (event) => {
 
 ["board-cards", "pot-bb", "call-bb", "opponents", "simulations"].forEach((id) => {
   el(id).addEventListener("input", () => {
+    state.analysisPending = true;
     renderTableState();
     analyze();
   });
   el(id).addEventListener("change", () => {
+    state.analysisPending = true;
     renderTableState();
     analyze();
   });
@@ -890,12 +1049,14 @@ function syncAutoStateControls() {
 
 el("auto-state").addEventListener("change", () => {
   syncAutoStateControls();
+  state.analysisPending = true;
   renderTableState();
   analyze();
 });
 
 el("street").addEventListener("change", () => {
   syncAutoStateControls();
+  state.analysisPending = true;
   renderTableState();
   analyze();
 });

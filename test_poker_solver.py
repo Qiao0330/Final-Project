@@ -728,9 +728,11 @@ def test_study_adapter_output_shape():
     four_bet_aa = next(item for item in four_bet_data["range_grid"] if item["hand"] == "AA")
     four_bet_a9s = next(item for item in four_bet_data["range_grid"] if item["hand"] == "A9s")
     assert four_bet_data["betting_state"]["next_to_act"] == "SB"
-    assert four_bet_aa["recommended"] == "Raise"
+    assert four_bet_aa["recommended"] in ("Raise", "All-in")
     assert four_bet_aa["actions"]["Raise"] > 0.0
+    assert four_bet_aa["actions"]["All-in"] > 0.0
     assert four_bet_a9s["actions"]["Raise"] == 0.0
+    assert four_bet_a9s["actions"]["All-in"] == 0.0
     assert four_bet_a9s["recommended"] == "Fold"
 
     flop_data = get_study_view_data(
