@@ -6,7 +6,14 @@ from random import choices, choice, sample
 from card import BOARD_SIZE, FULL_DECK, card_to_string
 from common import TABLE_POSITIONS, Action, Card, HoleCards, PlayerAction, Position, Rank
 from poker_eval import compare_hand_values, evaluate_7cards
-from range_model import get_hand_class, get_preflop_frequency, players_behind_count, position_to_string
+from range_model import (
+    get_hand_class,
+    get_preflop_frequency,
+    players_behind_count,
+    position_to_string,
+    three_bet_call_suitability,
+    three_bet_raise_suitability,
+)
 
 
 POSITIONS = TABLE_POSITIONS
@@ -658,9 +665,10 @@ def _evaluate_facing_3bet_option(
     if option.action == Action.CALL:
         candidates = _three_bet_range_candidates(scenario)
         equity = _estimate_equity_against_candidates(scenario.hero_hand, candidates, simulations)
-        realization = _equity_realization(scenario, option) - 0.04
+        realization = _three_bet_call_realization(scenario, option)
         final_pot = scenario.pot_size + option.call_amount
-        ev = equity * max(0.35, realization) * final_pot - option.call_amount
+        ev = equity * realization * final_pot - option.call_amount
+        ev += _three_bet_call_playability_bonus(scenario)
         return TrainerOptionResult(
             option=option,
             ev=ev,
@@ -678,6 +686,7 @@ def _evaluate_facing_3bet_option(
         fold_probability * scenario.pot_size
         + (1.0 - fold_probability) * (equity * final_pot - option.raise_amount)
     )
+    ev += _three_bet_raise_playability_bonus(scenario)
     ev -= _four_bet_strategy_penalty(scenario, option)
 
     return TrainerOptionResult(
@@ -832,10 +841,22 @@ def _estimate_open_first_fold_probability(
 
 
 def _three_bet_range_candidates(scenario: TrainerScenario) -> list[tuple[HoleCards, float, float]]:
-    candidates = _position_range_candidates(
+    raw_candidates = _position_range_candidates(
         position=scenario.three_bettor_position,
         hero_hand=scenario.hero_hand,
     )
+    candidates = [
+        (
+            hand,
+            weight,
+            three_bet_raise_suitability(
+                get_hand_class(hand),
+                scenario.opener_position,
+                scenario.three_bettor_position,
+            ),
+        )
+        for hand, weight, _score in raw_candidates
+    ]
     continue_fraction = {
         Position.HJ: 0.22,
         Position.CO: 0.26,
@@ -863,12 +884,23 @@ def _estimate_four_bet_fold_probability(
 ) -> float:
     base = 0.58 if option.total_bet < STACK_BB else 0.76
     hand_class = get_hand_class(scenario.hero_hand)
+    raise_score = three_bet_raise_suitability(
+        hand_class,
+        scenario.opener_position,
+        scenario.three_bettor_position,
+    )
 
     if hand_class.high_rank == int(Rank.ACE):
-        base += 0.05
+        base += 0.07
+        if hand_class.suited and hand_class.low_rank <= int(Rank.FIVE):
+            base += 0.05
     elif hand_class.high_rank == int(Rank.KING):
         base += 0.03
+        if hand_class.low_rank >= int(Rank.QUEEN):
+            base -= 0.14
     elif hand_class.high_rank < int(Rank.QUEEN):
+        base -= 0.16
+    elif hand_class.high_rank == int(Rank.QUEEN):
         base -= 0.08
 
     if hand_class.pair:
@@ -876,6 +908,12 @@ def _estimate_four_bet_fold_probability(
             base += 0.02
         else:
             base -= 0.18
+    elif hand_class.high_rank != int(Rank.ACE) and hand_class.low_rank < int(Rank.QUEEN):
+        base -= 0.08
+    if raise_score >= 82.0:
+        base += 0.04
+    elif raise_score < 62.0:
+        base -= 0.06
 
     if scenario.hero_position in (Position.UTG, Position.HJ) and scenario.three_bettor_position in (Position.SB, Position.BB):
         base -= 0.08
@@ -1205,6 +1243,58 @@ def _equity_realization(scenario: TrainerScenario, option: TrainerOption) -> flo
     return max(0.42, min(0.92, realization))
 
 
+def _three_bet_call_realization(scenario: TrainerScenario, option: TrainerOption) -> float:
+    hand_class = get_hand_class(scenario.hero_hand)
+    call_score = three_bet_call_suitability(
+        hand_class,
+        scenario.opener_position,
+        scenario.three_bettor_position,
+    )
+    realization = _equity_realization(scenario, option)
+    realization += max(-0.04, min(0.12, (call_score - 55.0) / 120.0))
+    if hand_class.suited and not hand_class.pair:
+        realization += 0.03
+    if hand_class.suited and max(0, hand_class.high_rank - hand_class.low_rank - 1) <= 1:
+        realization += 0.03
+    if scenario.hero_position not in (Position.SB, Position.BB):
+        realization += 0.03
+    return max(0.42, min(0.98, realization))
+
+
+def _three_bet_call_playability_bonus(scenario: TrainerScenario) -> float:
+    hand_class = get_hand_class(scenario.hero_hand)
+    call_score = three_bet_call_suitability(
+        hand_class,
+        scenario.opener_position,
+        scenario.three_bettor_position,
+    )
+    bonus = max(0.0, call_score - 54.0) * 0.030
+    if hand_class.suited and not hand_class.pair:
+        bonus += 0.18
+    if hand_class.suited and max(0, hand_class.high_rank - hand_class.low_rank - 1) <= 1:
+        bonus += 0.75
+    if hand_class.high_rank == int(Rank.ACE) and hand_class.suited:
+        bonus += 0.16
+    return min(1.45, bonus)
+
+
+def _three_bet_raise_playability_bonus(scenario: TrainerScenario) -> float:
+    hand_class = get_hand_class(scenario.hero_hand)
+    raise_score = three_bet_raise_suitability(
+        hand_class,
+        scenario.opener_position,
+        scenario.three_bettor_position,
+    )
+    bonus = max(0.0, raise_score - 70.0) * 0.018
+    if hand_class.high_rank == int(Rank.ACE):
+        bonus += 0.12
+    if hand_class.high_rank == int(Rank.ACE) and hand_class.suited and hand_class.low_rank <= int(Rank.FIVE):
+        bonus += 0.18
+    if hand_class.pair and hand_class.high_rank >= int(Rank.QUEEN):
+        bonus += 0.16
+    return min(0.85, bonus)
+
+
 def _adjust_3bet_fold_probability(
     scenario: TrainerScenario,
     option: TrainerOption,
@@ -1234,14 +1324,27 @@ def _adjust_3bet_fold_probability(
 def _three_bet_strategy_penalty(scenario: TrainerScenario, option: TrainerOption) -> float:
     hand_class = get_hand_class(scenario.hero_hand)
     frequency = get_preflop_frequency(scenario.hero_position, hand_class).open_frequency
-    penalty = (1.0 - frequency) * option.raise_amount * 0.18
+    raise_score = three_bet_raise_suitability(
+        hand_class,
+        scenario.opener_position,
+        scenario.three_bettor_position,
+    )
+    penalty = (1.0 - frequency) * option.raise_amount * 0.10
 
     if option.total_bet >= STACK_BB:
         penalty += option.raise_amount * 0.05
-    if hand_class.high_rank < int(Rank.QUEEN) and not hand_class.pair:
-        penalty += option.raise_amount * 0.03
+    if hand_class.high_rank < int(Rank.QUEEN) and not hand_class.pair and raise_score < 70.0:
+        penalty += option.raise_amount * 0.02
+    if (
+        hand_class.high_rank == int(Rank.ACE)
+        and hand_class.suited
+        and hand_class.low_rank <= int(Rank.FIVE)
+    ):
+        penalty -= option.raise_amount * 0.04
+    if hand_class.pair and hand_class.high_rank >= int(Rank.QUEEN):
+        penalty -= option.raise_amount * 0.03
 
-    return penalty
+    return max(0.0, penalty)
 
 
 def _continue_fraction(opener_position: Position, total_bet: float) -> float:

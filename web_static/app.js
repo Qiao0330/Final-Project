@@ -7,9 +7,30 @@ const state = {
   selectedHand: null,
   strategyProfile: null,
   trainerQuestion: null,
+  loadingCount: 0,
 };
 
 const el = (id) => document.getElementById(id);
+
+function showLoading(message = "Calculating range and EV...") {
+  state.loadingCount += 1;
+  const overlay = el("loading-overlay");
+  const messageNode = el("loading-message");
+  if (messageNode) {
+    messageNode.textContent = message;
+  }
+  if (overlay) {
+    overlay.classList.remove("hidden");
+  }
+}
+
+function hideLoading() {
+  state.loadingCount = Math.max(0, state.loadingCount - 1);
+  const overlay = el("loading-overlay");
+  if (overlay && state.loadingCount === 0) {
+    overlay.classList.add("hidden");
+  }
+}
 
 function formatNumber(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
@@ -155,6 +176,7 @@ function buildStudyPayload() {
 
 async function analyze() {
   el("status-line").textContent = "Analyzing...";
+  showLoading("Calculating range matrix and EV...");
   try {
     const data = await postJson("/api/study", buildStudyPayload());
     state.studyData = data;
@@ -164,6 +186,8 @@ async function analyze() {
     el("status-line").textContent = `Loaded ${data.range_grid.length} hand classes with ${data.range_simulations} range sims each against ${data.opponent_ranges.length} opponent ranges.`;
   } catch (error) {
     el("status-line").textContent = error.message;
+  } finally {
+    hideLoading();
   }
 }
 
@@ -322,6 +346,7 @@ function buildStrategyProfilePayload() {
 
 async function saveStrategyProfile() {
   el("profile-status").textContent = "Saving...";
+  showLoading("Saving strategy profile...");
   try {
     const profile = await postJson("/api/strategy-profiles", buildStrategyProfilePayload());
     state.strategyProfile = profile;
@@ -330,6 +355,8 @@ async function saveStrategyProfile() {
     analyze();
   } catch (error) {
     el("profile-status").textContent = error.message;
+  } finally {
+    hideLoading();
   }
 }
 
@@ -606,6 +633,7 @@ function renderHandsTable(items) {
 
 async function loadTrainerQuestion() {
   el("trainer-status").textContent = "Loading question...";
+  showLoading("Generating trainer question...");
   try {
     const street = el("trainer-street").value;
     const endpoint = street === "flop" ? "/api/flop-trainer/question" : "/api/trainer/question";
@@ -622,6 +650,8 @@ async function loadTrainerQuestion() {
     el("trainer-status").textContent = question.question_id;
   } catch (error) {
     el("trainer-status").textContent = error.message;
+  } finally {
+    hideLoading();
   }
 }
 
@@ -720,6 +750,7 @@ function formatFlopCards(cards) {
 async function gradeTrainer(action) {
   if (!state.trainerQuestion) return;
   el("trainer-status").textContent = "Grading...";
+  showLoading("Grading action EV...");
   try {
     const endpoint = state.trainerQuestion.street === "flop" ? "/api/flop-trainer/grade" : "/api/trainer/grade";
     const result = await postJson(endpoint, {
@@ -730,6 +761,8 @@ async function gradeTrainer(action) {
     el("trainer-status").textContent = result.is_correct ? "Correct" : "Review EVs";
   } catch (error) {
     el("trainer-status").textContent = error.message;
+  } finally {
+    hideLoading();
   }
 }
 

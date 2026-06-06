@@ -31,6 +31,9 @@ from range_model import (
     get_preflop_frequency,
     hand_strength_score,
     position_to_string,
+    three_bet_call_suitability,
+    three_bet_raise_suitability,
+    three_bet_response_targets,
 )
 
 
@@ -414,8 +417,18 @@ def _preflop_action_profile(
             raise_amounts,
         )
     elif raise_count == 2:
-        call_threshold = _three_bet_call_threshold(hero_position)
-        raise_threshold = _three_bet_raise_threshold(hero_position)
+        raises = [record for record in action_history if record.action == Action.RAISE]
+        opener_position = raises[0].position
+        three_bettor_position = raises[1].position
+        return _facing_three_bet_action_profile(
+            hero_position,
+            opener_position,
+            three_bettor_position,
+            hand_class,
+            call_amount_bb,
+            pot_bb,
+            raise_amounts,
+        )
     else:
         return _facing_four_bet_action_profile(
             hand_class,
@@ -424,20 +437,122 @@ def _preflop_action_profile(
             raise_amounts,
         )
 
-    total_raise = _frequency_from_threshold(score, raise_threshold)
-    call_frequency = _call_frequency_from_threshold(score, call_threshold, total_raise)
-    fold_frequency = max(0.0, 100.0 - call_frequency - total_raise)
+    raise RuntimeError("unreachable action profile branch")
+
+
+@lru_cache(maxsize=None)
+def _three_bet_response_strategy(
+    opener_position: Position,
+    three_bettor_position: Position,
+) -> tuple[dict[str, float], dict[str, float], float, float]:
+    hand_classes = all_preflop_hand_classes()
+    call_target, raise_target = three_bet_response_targets(opener_position, three_bettor_position)
+    raise_scores = {
+        hand_class.name: three_bet_raise_suitability(hand_class, opener_position, three_bettor_position)
+        for hand_class in hand_classes
+    }
+    raise_map, raise_boundary = _allocate_ranked_frequency(
+        hand_classes,
+        raise_scores,
+        raise_target,
+    )
+    raise_map = _protect_three_bet_call_range(raise_map, opener_position)
+    call_scores = {
+        hand_class.name: three_bet_call_suitability(hand_class, opener_position, three_bettor_position)
+        for hand_class in hand_classes
+    }
+    call_map, call_boundary = _allocate_ranked_frequency(
+        hand_classes,
+        call_scores,
+        call_target,
+        excluded=raise_map,
+    )
+    call_map = _add_three_bet_trap_calls(call_map, raise_map, opener_position)
+    return call_map, raise_map, call_boundary, raise_boundary
+
+
+def _protect_three_bet_call_range(
+    raise_map: dict[str, float],
+    opener_position: Position,
+) -> dict[str, float]:
+    protected = dict(raise_map)
+    trap_sizes = {
+        "AA": 0.18,
+        "KK": 0.14,
+        "QQ": 0.10,
+        "AKs": 0.12,
+        "AKo": 0.06,
+    }
+    if opener_position in (Position.CO, Position.BTN, Position.SB):
+        trap_sizes.update({"JJ": 0.06, "AQs": 0.06})
+    for hand_name, trap_frequency in trap_sizes.items():
+        if protected.get(hand_name, 0.0) > trap_frequency:
+            protected[hand_name] -= trap_frequency
+    return protected
+
+
+def _add_three_bet_trap_calls(
+    call_map: dict[str, float],
+    raise_map: dict[str, float],
+    opener_position: Position,
+) -> dict[str, float]:
+    protected = dict(call_map)
+    trap_sizes = {
+        "AA": 0.18,
+        "KK": 0.14,
+        "QQ": 0.10,
+        "AKs": 0.12,
+        "AKo": 0.06,
+    }
+    if opener_position in (Position.CO, Position.BTN, Position.SB):
+        trap_sizes.update({"JJ": 0.06, "AQs": 0.06})
+    for hand_name, trap_frequency in trap_sizes.items():
+        available = max(0.0, 1.0 - raise_map.get(hand_name, 0.0))
+        protected[hand_name] = min(available, protected.get(hand_name, 0.0) + trap_frequency)
+    return protected
+
+
+def _facing_three_bet_action_profile(
+    hero_position: Position,
+    opener_position: Position,
+    three_bettor_position: Position,
+    hand_class,
+    call_amount_bb: float,
+    pot_bb: float,
+    raise_amounts: tuple[float, ...],
+) -> tuple[dict[str, float], dict[str, float], list[dict]]:
+    call_map, raise_map, call_boundary, raise_boundary = _three_bet_response_strategy(
+        opener_position,
+        three_bettor_position,
+    )
+    call_frequency = call_map.get(hand_class.name, 0.0) * 100.0
+    raise_frequency = raise_map.get(hand_class.name, 0.0) * 100.0
+    fold_frequency = max(0.0, 100.0 - call_frequency - raise_frequency)
+
+    call_score = three_bet_call_suitability(hand_class, opener_position, three_bettor_position)
+    raise_score = three_bet_raise_suitability(hand_class, opener_position, three_bettor_position)
+    pot_odds = call_amount_bb / max(0.01, pot_bb + call_amount_bb)
+    position_bonus = 0.06 if hero_position not in (Position.SB, Position.BB) else -0.03
+    blind_vs_blind_bonus = 0.06 if opener_position == Position.SB and three_bettor_position == Position.BB else 0.0
+    call_ev = (call_score - call_boundary) / 17.0 + position_bonus + blind_vs_blind_bonus - pot_odds * 0.12
+    raise_ev = (raise_score - raise_boundary) / 15.0 + pot_bb * 0.025
+
     evs = {
         "Fold": 0.0,
-        "Call": (score - call_threshold) / 14.0,
-        "Raise": _best_raise_ev(score, raise_threshold, pot_bb, raise_amounts),
+        "Call": call_ev,
+        "Raise": raise_ev,
     }
     actions = {
         "Fold": fold_frequency,
         "Call": call_frequency,
-        "Raise": total_raise,
+        "Raise": raise_frequency,
     }
-    return actions, evs, _raise_options_from_score(score, raise_threshold, pot_bb, raise_amounts, total_raise)
+    return actions, evs, _raise_options_from_base_ev(
+        raise_ev,
+        raise_score,
+        raise_amounts,
+        raise_frequency,
+    )
 
 
 def _facing_four_bet_action_profile(

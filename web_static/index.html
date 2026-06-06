@@ -7,6 +7,15 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+  <div id="loading-overlay" class="loading-overlay hidden" role="status" aria-live="polite" aria-label="Analysis in progress">
+    <div class="loading-card">
+      <div class="loading-spinner" aria-hidden="true"></div>
+      <div>
+        <strong id="loading-title">Analyzing</strong>
+        <span id="loading-message">Calculating range and EV...</span>
+      </div>
+    </div>
+  </div>
   <main class="app-shell">
     <header class="topbar">
       <div>

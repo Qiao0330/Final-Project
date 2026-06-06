@@ -249,6 +249,155 @@ def hand_strength_score(hand_class: HandClass) -> int:
     return _hand_strength_score(hand_class)
 
 
+def hand_combo_count(hand_class: HandClass) -> int:
+    return _combination_count(hand_class)
+
+
+def three_bet_response_targets(
+    opener_position: Position,
+    three_bettor_position: Position,
+) -> tuple[float, float]:
+    opener_late = opener_position in (Position.CO, Position.BTN, Position.SB)
+    blind_three_bet = three_bettor_position in (Position.SB, Position.BB)
+
+    call_target = {
+        Position.UTG: 0.055,
+        Position.HJ: 0.068,
+        Position.CO: 0.088,
+        Position.BTN: 0.128,
+        Position.SB: 0.078,
+    }.get(opener_position, 0.08)
+    raise_target = {
+        Position.UTG: 0.032,
+        Position.HJ: 0.040,
+        Position.CO: 0.052,
+        Position.BTN: 0.072,
+        Position.SB: 0.048,
+    }.get(opener_position, 0.045)
+
+    if blind_three_bet:
+        call_target += 0.018 if opener_late else 0.010
+        raise_target += 0.008
+    if three_bettor_position == Position.BB and opener_position == Position.SB:
+        call_target += 0.035
+        raise_target += 0.012
+
+    return _clamp(call_target, 0.035, 0.18), _clamp(raise_target, 0.025, 0.10)
+
+
+def three_bet_call_suitability(
+    hand_class: HandClass,
+    opener_position: Position,
+    three_bettor_position: Position,
+) -> float:
+    high = hand_class.high_rank
+    low = hand_class.low_rank
+    gap = max(0, high - low - 1)
+    in_position = opener_position not in (Position.SB, Position.BB)
+    blind_three_bet = three_bettor_position in (Position.SB, Position.BB)
+
+    score = high * 1.35 + low * 1.35
+    if hand_class.pair:
+        score += 26.0 + high * 1.4
+        if high <= int(Rank.FIVE):
+            score -= 4.0
+    if hand_class.suited:
+        score += 16.0
+    if gap == 0:
+        score += 8.0
+    elif gap == 1:
+        score += 6.0
+    elif gap == 2:
+        score += 3.0
+    elif gap >= 4:
+        score -= gap * 2.6
+
+    if high == int(Rank.ACE):
+        score += 8.0 if hand_class.suited else 2.0
+        if low <= int(Rank.FIVE) and hand_class.suited:
+            score += 7.0
+    elif high == int(Rank.KING) and hand_class.suited:
+        score += 5.0
+    if high >= int(Rank.TEN) and low >= int(Rank.TEN):
+        score += 6.0
+    if hand_class.suited and high <= int(Rank.JACK) and gap <= 1:
+        score += 7.0
+    if not hand_class.suited and not hand_class.pair and low < int(Rank.TEN):
+        score -= 12.0
+    if not hand_class.suited and high < int(Rank.ACE) and low < int(Rank.QUEEN):
+        score -= 5.0
+
+    if in_position:
+        score += 4.0
+    else:
+        score -= 4.0
+    if blind_three_bet:
+        score += 2.5
+    if opener_position in (Position.UTG, Position.HJ):
+        score -= 3.0
+
+    return score
+
+
+def three_bet_raise_suitability(
+    hand_class: HandClass,
+    opener_position: Position,
+    three_bettor_position: Position,
+) -> float:
+    high = hand_class.high_rank
+    low = hand_class.low_rank
+    gap = max(0, high - low - 1)
+    value_score = high * 1.55 + low * 1.05
+
+    if hand_class.pair:
+        if high >= int(Rank.QUEEN):
+            value_score += 34.0 + high * 2.2
+        elif high >= int(Rank.TEN):
+            value_score += 22.0 + high * 1.2
+        else:
+            value_score += 2.0
+    if high >= int(Rank.TEN) and low >= int(Rank.TEN):
+        value_score += 8.0
+
+    bluff_score = 0.0
+    if high == int(Rank.ACE):
+        bluff_score += 18.0
+        if hand_class.suited and low <= int(Rank.FIVE):
+            bluff_score += 18.0
+        elif hand_class.suited:
+            bluff_score += 7.0
+        elif low >= int(Rank.QUEEN):
+            bluff_score += 5.0
+    elif high == int(Rank.KING):
+        bluff_score += 3.0
+        if hand_class.suited:
+            bluff_score += 2.0
+        if hand_class.suited and low <= int(Rank.FIVE):
+            bluff_score += 7.0
+        if low >= int(Rank.QUEEN):
+            bluff_score -= 8.0
+    elif high == int(Rank.QUEEN) and hand_class.suited and low >= int(Rank.TEN):
+        bluff_score += 5.0
+
+    if hand_class.suited and gap <= 1 and high <= int(Rank.JACK):
+        bluff_score += 8.0
+    if hand_class.suited and gap <= 2:
+        bluff_score += 3.0
+    if not hand_class.suited and not hand_class.pair and low < int(Rank.QUEEN):
+        bluff_score -= 14.0
+    if hand_class.pair and high < int(Rank.TEN):
+        bluff_score -= 10.0
+
+    if opener_position in (Position.CO, Position.BTN, Position.SB):
+        bluff_score += 4.0
+    if three_bettor_position in (Position.SB, Position.BB):
+        bluff_score += 2.0
+    if opener_position in (Position.UTG, Position.HJ):
+        bluff_score -= 4.0
+
+    return value_score + bluff_score
+
+
 def all_preflop_hand_classes() -> tuple[HandClass, ...]:
     classes: list[HandClass] = []
     for row_rank in RANKS_DESCENDING:
