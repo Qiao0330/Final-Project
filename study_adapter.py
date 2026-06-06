@@ -329,7 +329,11 @@ def _action_evs_from_equity(
     if "Check" in actions:
         evs["Check"] = equity * pot_bb
     if "Call" in actions:
-        evs["Call"] = equity * (pot_bb + call_amount_bb) - call_amount_bb
+        evs["Call"] = (
+            equity * (pot_bb + call_amount_bb) - call_amount_bb
+            if actions.get("Call", 0.0) > 0.0
+            else -999.0
+        )
 
     raise_evs: dict[str, float] = {}
     all_in_evs: dict[str, float] = {}
@@ -443,6 +447,16 @@ def _preflop_action_profile(
         raises = [record for record in action_history if record.action == Action.RAISE]
         opener_position = raises[0].position
         three_bettor_position = raises[1].position
+        if _is_cold_facing_reraise(hero_position, action_history):
+            return _cold_facing_three_bet_action_profile(
+                hero_position,
+                opener_position,
+                three_bettor_position,
+                hand_class,
+                call_amount_bb,
+                pot_bb,
+                raise_amounts,
+            )
         return _facing_three_bet_action_profile(
             hero_position,
             opener_position,
@@ -453,6 +467,13 @@ def _preflop_action_profile(
             raise_amounts,
         )
     else:
+        if _is_cold_facing_reraise(hero_position, action_history):
+            return _cold_facing_four_bet_action_profile(
+                hand_class,
+                call_amount_bb,
+                pot_bb,
+                raise_amounts,
+            )
         return _facing_four_bet_action_profile(
             hand_class,
             call_amount_bb,
@@ -578,6 +599,102 @@ def _facing_three_bet_action_profile(
     )
 
 
+def _is_cold_facing_reraise(hero_position: Position, action_history) -> bool:
+    return not any(
+        record.position == hero_position
+        and record.action in (Action.CALL, Action.RAISE, Action.CHECK)
+        for record in action_history
+    )
+
+
+def _cold_facing_three_bet_action_profile(
+    hero_position: Position,
+    opener_position: Position,
+    three_bettor_position: Position,
+    hand_class,
+    call_amount_bb: float,
+    pot_bb: float,
+    raise_amounts: tuple[float, ...],
+) -> tuple[dict[str, float], dict[str, float], list[dict]]:
+    raise_frequency = _cold_three_bet_raise_frequency(hand_class, hero_position, opener_position, three_bettor_position)
+    call_frequency = _cold_three_bet_trap_call_frequency(hand_class)
+    call_frequency = min(call_frequency, max(0.0, 100.0 - raise_frequency))
+    fold_frequency = max(0.0, 100.0 - raise_frequency - call_frequency)
+
+    raise_score = three_bet_raise_suitability(hand_class, opener_position, three_bettor_position)
+    call_score = three_bet_call_suitability(hand_class, opener_position, three_bettor_position)
+    pot_odds = call_amount_bb / max(0.01, pot_bb + call_amount_bb)
+    raise_ev = (raise_score - 72.0) / 16.0 + pot_bb * 0.025
+    call_ev = (call_score - 88.0) / 20.0 - pot_odds * 0.22
+    if call_frequency <= 0.0:
+        call_ev = -999.0
+    if raise_frequency <= 0.0:
+        raise_ev = -999.0
+
+    actions = {
+        "Fold": fold_frequency,
+        "Call": call_frequency,
+        "Raise": raise_frequency,
+    }
+    evs = {
+        "Fold": 0.0,
+        "Call": call_ev,
+        "Raise": raise_ev,
+    }
+    return actions, evs, _raise_options_from_base_ev(
+        raise_ev,
+        raise_score,
+        raise_amounts,
+        raise_frequency,
+    )
+
+
+def _cold_three_bet_trap_call_frequency(hand_class) -> float:
+    trap_calls = {
+        "AA": 6.0,
+        "KK": 4.0,
+        "AKs": 2.0,
+    }
+    return trap_calls.get(hand_class.name, 0.0)
+
+
+def _cold_three_bet_raise_frequency(
+    hand_class,
+    hero_position: Position,
+    opener_position: Position,
+    three_bettor_position: Position,
+) -> float:
+    name = hand_class.name
+    base = {
+        "AA": 94.0,
+        "KK": 96.0,
+        "QQ": 85.0,
+        "JJ": 45.0,
+        "TT": 20.0,
+        "AKs": 80.0,
+        "AKo": 65.0,
+        "AQs": 45.0,
+        "AQo": 12.0,
+        "AJs": 18.0,
+        "KQs": 16.0,
+        "A5s": 25.0,
+        "A4s": 22.0,
+        "A3s": 12.0,
+        "A2s": 10.0,
+    }.get(name, 0.0)
+
+    if opener_position in (Position.UTG, Position.HJ):
+        base *= 0.72
+    if three_bettor_position in (Position.SB, Position.BB):
+        base *= 1.12
+    if hero_position == Position.BTN:
+        base *= 1.08
+    elif hero_position in (Position.SB, Position.BB):
+        base *= 0.78
+
+    return max(0.0, min(100.0, base))
+
+
 def _facing_four_bet_action_profile(
     hand_class,
     call_amount_bb: float,
@@ -636,6 +753,67 @@ def _facing_four_bet_action_profile(
         raise_amounts,
         raise_frequency + all_in_frequency,
     )
+
+
+def _cold_facing_four_bet_action_profile(
+    hand_class,
+    call_amount_bb: float,
+    pot_bb: float,
+    raise_amounts: tuple[float, ...],
+) -> tuple[dict[str, float], dict[str, float], list[dict]]:
+    score = hand_strength_score(hand_class)
+    has_all_in = any(_is_all_in_total(amount) for amount in raise_amounts)
+    raise_frequency = 0.0
+    all_in_frequency = 0.0
+    if hand_class.name == "AA":
+        all_in_frequency = 90.0 if has_all_in else 0.0
+        raise_frequency = 10.0 if has_all_in else 100.0
+    elif hand_class.name == "KK":
+        all_in_frequency = 76.0 if has_all_in else 0.0
+        raise_frequency = 14.0 if has_all_in else 90.0
+    elif hand_class.name in ("AKs", "QQ"):
+        all_in_frequency = 42.0 if has_all_in else 0.0
+        raise_frequency = 18.0 if has_all_in else 60.0
+    elif hand_class.name in ("AKo", "A5s"):
+        all_in_frequency = 16.0 if has_all_in else 0.0
+        raise_frequency = 10.0 if has_all_in else 26.0
+
+    fold_frequency = max(0.0, 100.0 - raise_frequency - all_in_frequency)
+    pot_odds = call_amount_bb / max(0.01, pot_bb + call_amount_bb)
+    raise_ev = (score - 84.0) / 12.0 + pot_bb * 0.025 if raise_frequency > 0.0 else -999.0
+    all_in_ev = (score - 82.0) / 10.0 + pot_bb * 0.035 if all_in_frequency > 0.0 else -999.0
+
+    actions = {
+        "Fold": fold_frequency,
+        "Call": 0.0,
+        "Raise": raise_frequency,
+    }
+    evs = {
+        "Fold": 0.0,
+        "Call": -999.0,
+        "Raise": raise_ev,
+    }
+    if has_all_in:
+        actions["All-in"] = all_in_frequency
+        evs["All-in"] = all_in_ev
+    return actions, evs, [
+        *_raise_options(
+            {
+                _raise_label(amount): raise_ev
+                for amount in raise_amounts
+                if amount > 0.0 and not _is_all_in_total(amount)
+            },
+            raise_frequency,
+        ),
+        *_raise_options(
+            {
+                _raise_label(amount): all_in_ev
+                for amount in raise_amounts
+                if _is_all_in_total(amount)
+            },
+            all_in_frequency,
+        ),
+    ]
 
 
 def _single_open_action_profile(
