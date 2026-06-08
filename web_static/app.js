@@ -8,6 +8,8 @@ const state = {
   selectedHand: null,
   strategyProfile: null,
   trainerQuestion: null,
+  trainerReadyTimer: null,
+  trainerCanAnswer: false,
   loadingCount: 0,
   analysisRequestId: 0,
   analysisPending: false,
@@ -786,6 +788,11 @@ function renderHandsTable(items) {
 
 async function loadTrainerQuestion() {
   el("trainer-status").textContent = "Loading question...";
+  if (state.trainerReadyTimer) {
+    clearTimeout(state.trainerReadyTimer);
+    state.trainerReadyTimer = null;
+  }
+  setTrainerAnswerReady(false);
   showLoading("Generating trainer question...");
   try {
     const street = el("trainer-street").value;
@@ -803,6 +810,7 @@ async function loadTrainerQuestion() {
     el("trainer-status").textContent = question.question_id;
   } catch (error) {
     el("trainer-status").textContent = error.message;
+    setTrainerAnswerReady(true);
   } finally {
     hideLoading();
   }
@@ -851,12 +859,33 @@ function actionDisplay(record) {
   }
   const action = String(record.action || "").toLowerCase();
   const amount = Number(record.amount || 0);
+  if (action === "hero") return { action: "Hero", detail: record.detail || "" };
+  if (action === "in_hand") return { action: "In hand", detail: record.detail || "" };
+  if (action === "out") return { action: "Folded", detail: record.detail || "preflop" };
   if (action === "fold") return { action: "fold", detail: "" };
   if (action === "check") return { action: "check", detail: "" };
+  if (action === "bet") return { action: "bet", detail: `${formatNumber(amount, 1)} BB` };
   if (action === "call") return { action: "call", detail: `${formatNumber(amount, 1)} BB` };
   if (action === "raise" && amount >= EFFECTIVE_STACK_BB - 1) return { action: "all-in", detail: `${formatNumber(amount, 0)} BB` };
   if (action === "raise") return { action: "raise", detail: `${formatNumber(amount, 1)} BB` };
   return { action: action || "waiting", detail: amount ? `${formatNumber(amount, 1)} BB` : "" };
+}
+
+function actionClassName(action) {
+  return String(action || "waiting").toLowerCase().replace(/_/g, "-").replace(/[^a-z-]/g, "");
+}
+
+function actionShortLabel(action) {
+  const value = String(action || "").toLowerCase();
+  if (value === "raise") return "Raise";
+  if (value === "bet") return "Bet";
+  if (value === "call") return "Call";
+  if (value === "check") return "Check";
+  if (value === "fold") return "Fold";
+  if (value === "hero") return "Hero";
+  if (value === "in_hand") return "In hand";
+  if (value === "out") return "Folded";
+  return String(action || "");
 }
 
 function latestActionsBySeat(records = []) {
@@ -868,10 +897,233 @@ function latestActionsBySeat(records = []) {
   return latest;
 }
 
+function trainerActionTiming(question, records = []) {
+  const timing = {};
+  let elapsedMs = 0;
+  records.forEach((record, index) => {
+    if (!record || !SEATS.includes(record.position)) return;
+    const shouldThink = String(record.action || "").toLowerCase() !== "fold";
+    const thinkMs = shouldThink ? 350 : 0;
+    timing[record.position] = {
+      thinks: shouldThink,
+      thinkDelayMs: elapsedMs,
+      actionDelayMs: elapsedMs + thinkMs,
+    };
+    elapsedMs += thinkMs + 650;
+  });
+  return timing;
+}
+
+function trainerReadyDelay(timing) {
+  const actionEndMs = Object.values(timing).reduce((latest, item) => (
+    Math.max(latest, Number(item.actionDelayMs || 0) + 650)
+  ), 0);
+  return Math.max(350, actionEndMs + 180);
+}
+
+function trainerTableRecords(question) {
+  const records = Array.isArray(question.action_history) ? question.action_history : [];
+  if (question.street !== "flop") return records;
+  const visibleRecords = records.filter((record) => SEATS.includes(record.position));
+  if (question.pfa_action && SEATS.includes(question.pfa_position)) {
+    visibleRecords.push({
+      position: question.pfa_position,
+      action: question.pfa_action,
+      amount: question.pfa_action === "bet" ? question.pfa_bet_size_bb : 0,
+    });
+  }
+  return visibleRecords;
+}
+
+function flopSeatRecord(question, seat, latestRecord) {
+  if (question.street !== "flop") return latestRecord || null;
+  if (latestRecord) return latestRecord;
+
+  const heroSeat = question.hero_table_position || question.hero_position;
+  const opponentSeat = question.opponent_position;
+  const pfaSeat = question.pfa_position;
+  const defenderSeat = question.defender_position;
+
+  if (seat === heroSeat) {
+    return {
+      position: seat,
+      action: "hero",
+      detail: question.hero_role || "to act",
+      isContext: true,
+    };
+  }
+  if (seat === opponentSeat) {
+    return {
+      position: seat,
+      action: "in_hand",
+      detail: seat === pfaSeat ? "preflop aggressor" : seat === defenderSeat ? "defender" : "opponent",
+      isContext: true,
+    };
+  }
+  return {
+    position: seat,
+    action: "out",
+    detail: "preflop",
+    isContext: true,
+  };
+}
+
+function chipStackForSeat(question, seat) {
+  if (question.street === "flop") {
+    const remaining = Number(question.remaining_stack_bb || 0);
+    if (seat === question.hero_table_position || seat === question.opponent_position) {
+      return remaining > 0 ? remaining : 100;
+    }
+  }
+  return Number(question.stacks?.[seat] ?? (seat === "SB" ? 99.5 : seat === "BB" ? 99 : 100));
+}
+
+function preflopHistoryChips(question) {
+  const contributions = Object.fromEntries(SEATS.map((seat) => [seat, 0]));
+  contributions.SB = 0.5;
+  contributions.BB = 1.0;
+  let currentBet = 1.0;
+  const blindBySeat = { SB: 0.5, BB: 1.0 };
+  const chips = [];
+
+  (question.action_history || []).forEach((record) => {
+    const seat = record.position;
+    if (!SEATS.includes(seat)) return;
+    if (record.action === "call") {
+      const toCall = Math.max(0, currentBet - contributions[seat]);
+      contributions[seat] += toCall;
+    } else if (record.action === "raise") {
+      const newTotal = Math.min(Number(record.amount || 0), EFFECTIVE_STACK_BB);
+      contributions[seat] = newTotal;
+      currentBet = newTotal;
+    }
+    const stackAfterAction = Math.max(0, chipStackForSeat(question, seat) - (contributions[seat] - (blindBySeat[seat] || 0)));
+    chips.push(seatHistoryChip(
+      seat,
+      stackAfterAction,
+      record.action,
+      record.action === "raise" || record.action === "call"
+        ? formatNumber(record.amount, 1)
+        : ""
+    ));
+  });
+
+  const heroSeat = question.hero_position;
+  const heroStack = Math.max(0, chipStackForSeat(question, heroSeat) - (contributions[heroSeat] - (blindBySeat[heroSeat] || 0)));
+  chips.push({
+    type: "turn",
+    seat: heroSeat,
+    stack: formatNumber(heroStack, heroStack % 1 === 0 ? 0 : 1),
+    label: "Take action",
+  });
+
+  return chips;
+}
+
+function seatHistoryChip(seat, stack, action, detail = "") {
+  return {
+    type: "seat",
+    seat: seat,
+    stack: formatNumber(stack, stack % 1 === 0 ? 0 : 1),
+    action: actionShortLabel(action),
+    detail: detail,
+    actionClass: actionClassName(action),
+  };
+}
+
+function trainerHistoryChips(question) {
+  if (question.street !== "flop") {
+    return preflopHistoryChips(question);
+  }
+
+  const heroSeat = question.hero_table_position || question.hero_position;
+  const opponentSeat = question.opponent_position;
+  const pfaSeat = question.pfa_position;
+  const involvedSeats = new Set([heroSeat, opponentSeat]);
+  const chips = [];
+
+  SEATS.forEach((seat) => {
+    if (involvedSeats.has(seat)) return;
+    chips.push(seatHistoryChip(seat, chipStackForSeat(question, seat), "fold", ""));
+  });
+
+  if (pfaSeat === heroSeat) {
+    chips.push(seatHistoryChip(heroSeat, chipStackForSeat(question, heroSeat), question.pot_type, ""));
+    chips.push(seatHistoryChip(opponentSeat, chipStackForSeat(question, opponentSeat), "call", ""));
+  } else {
+    chips.push(seatHistoryChip(opponentSeat, chipStackForSeat(question, opponentSeat), question.pot_type, ""));
+    chips.push(seatHistoryChip(heroSeat, chipStackForSeat(question, heroSeat), "call", ""));
+  }
+
+  chips.push({
+    type: "board",
+    label: `Flop ${formatNumber(question.pot_bb, 1)}`,
+    cards: question.flop_cards || [],
+  });
+
+  if (question.pfa_action && question.pfa_position) {
+    chips.push(seatHistoryChip(
+      question.pfa_position,
+      chipStackForSeat(question, question.pfa_position),
+      question.pfa_action,
+      question.pfa_action === "bet" ? formatNumber(question.pfa_bet_size_bb, 1) : ""
+    ));
+  }
+
+  chips.push({
+    type: "turn",
+    seat: heroSeat,
+    stack: formatNumber(chipStackForSeat(question, heroSeat), chipStackForSeat(question, heroSeat) % 1 === 0 ? 0 : 1),
+    label: "Take action",
+  });
+
+  return chips;
+}
+
+function renderTrainerActionHistory(question) {
+  const container = el("trainer-action-history");
+  if (!container) return;
+  const chips = trainerHistoryChips(question);
+  container.innerHTML = chips.map((chip) => {
+    if (chip.type === "board") {
+      return `
+        <div class="trainer-history-chip trainer-history-chip-board">
+          <span class="trainer-history-chip-label">${escapeHtml(chip.label)}</span>
+          <div class="trainer-history-board-cards">
+            ${chip.cards.map((card) => {
+              const meta = cardSuitMeta(card);
+              return `<span class="trainer-history-board-card ${meta.className}">${escapeHtml(String(card).slice(0, -1).toUpperCase())}</span>`;
+            }).join("")}
+          </div>
+        </div>
+      `;
+    }
+    if (chip.type === "turn") {
+      return `
+        <div class="trainer-history-chip trainer-history-chip-turn">
+          <span class="trainer-history-chip-seat">${escapeHtml(chip.seat)}</span>
+          <span class="trainer-history-chip-stack">${escapeHtml(chip.stack)}</span>
+          <span class="trainer-history-chip-action">${escapeHtml(chip.label)}</span>
+        </div>
+      `;
+    }
+    return `
+      <div class="trainer-history-chip trainer-history-chip-${escapeHtml(chip.actionClass)}">
+        <span class="trainer-history-chip-seat">${escapeHtml(chip.seat)}</span>
+        <span class="trainer-history-chip-stack">${escapeHtml(chip.stack)}</span>
+        <span class="trainer-history-chip-action">${escapeHtml(chip.action)}</span>
+        ${chip.detail ? `<span class="trainer-history-chip-detail">${escapeHtml(chip.detail)}</span>` : ""}
+      </div>
+    `;
+  }).join("");
+}
+
 function renderTrainerTable(question) {
   const table = el("trainer-table");
-  const records = Array.isArray(question.action_history) ? question.action_history : [];
+  const records = trainerTableRecords(question);
   const latest = latestActionsBySeat(records);
+  const timing = trainerActionTiming(question, records);
+  const readyDelayMs = trainerReadyDelay(timing);
   const lastSeat = [...records].reverse().find((record) => SEATS.includes(record.position))?.position;
   const heroSeat = question.hero_position || question.hero_table_position;
   const centerLines = [];
@@ -886,6 +1138,9 @@ function renderTrainerTable(question) {
         : `${question.pfa_position} checks`;
       centerLines.push(`<small>${escapeHtml(pfaText)}</small>`);
     }
+    if (question.preflop_summary) {
+      centerLines.push(`<small class="trainer-preflop-context">${escapeHtml(question.preflop_summary)}</small>`);
+    }
   } else {
     centerLines.push(`<span>Pot</span>`);
     centerLines.push(`<strong>${formatNumber(question.pot_bb, 1)} BB</strong>`);
@@ -897,20 +1152,27 @@ function renderTrainerTable(question) {
 
   table.innerHTML = `
     <div class="trainer-felt-center">${centerLines.join("")}</div>
+    <div class="trainer-user-turn-indicator" aria-live="polite">Your action</div>
     ${SEATS.map((seat) => {
-      const record = latest[seat];
+      const record = flopSeatRecord(question, seat, latest[seat]);
       const display = actionDisplay(record);
       const classes = [
         "trainer-seat",
         `trainer-seat-${seat.toLowerCase()}`,
-        record ? "has-action" : "",
-        record ? `trainer-action-${display.action.replace(/[^a-z-]/g, "")}` : "trainer-action-waiting",
+        record && !record.isContext ? "has-action" : "",
+        timing[seat]?.thinks ? "has-thinking" : "",
+        record ? `trainer-action-${actionClassName(record.action)}` : "trainer-action-waiting",
+        record?.isContext ? "is-context-seat" : "",
+        question.street === "flop" && seat === question.opponent_position ? "is-opponent" : "",
         seat === heroSeat ? "is-hero" : "",
         seat === lastSeat ? "is-last-action" : "",
       ].filter(Boolean).join(" ");
       const stack = question.stacks?.[seat] ?? (seat === "SB" ? 99.5 : seat === "BB" ? 99 : 100);
+      const actionOrder = record?.order || 0;
+      const thinkDelayMs = timing[seat]?.thinkDelayMs || 0;
+      const actionDelayMs = timing[seat]?.actionDelayMs || 0;
       return `
-        <div class="${classes}" style="--action-order: ${record?.order || 0}">
+        <div class="${classes}" style="--action-order: ${actionOrder}; --think-delay: ${thinkDelayMs}ms; --action-delay: ${actionDelayMs}ms">
           <div class="trainer-seat-top">
             <span>${escapeHtml(seat)}</span>
             <strong>${formatNumber(stack, 0)}</strong>
@@ -922,6 +1184,8 @@ function renderTrainerTable(question) {
       `;
     }).join("")}
   `;
+  table.classList.remove("is-user-turn");
+  table.classList.add("is-awaiting-user");
 
   const heroCards = table.querySelector(".trainer-seat-cards");
   if (heroCards) {
@@ -932,6 +1196,8 @@ function renderTrainerTable(question) {
     const board = table.querySelector("#trainer-table-board");
     if (board) renderCardTiles(board, question.flop_cards || []);
   }
+
+  return readyDelayMs;
 }
 
 function renderTrainerCards(question) {
@@ -956,6 +1222,51 @@ function renderTrainerHistoryItems(items) {
   });
 }
 
+function setTrainerAnswerReady(isReady) {
+  state.trainerCanAnswer = isReady;
+  const table = el("trainer-table");
+  const actions = el("trainer-actions");
+  if (table) {
+    table.classList.toggle("is-awaiting-user", !isReady);
+    table.classList.toggle("is-user-turn", isReady);
+    table.querySelectorAll(".trainer-seat.is-hero").forEach((seat) => {
+      seat.classList.toggle("is-user-turn", isReady);
+    });
+  }
+  if (actions) {
+    actions.classList.toggle("is-locked", !isReady);
+    actions.classList.toggle("is-ready", isReady);
+    actions.querySelectorAll("button").forEach((button) => {
+      button.disabled = !isReady;
+    });
+  }
+}
+
+function armTrainerAnswerState(readyDelayMs) {
+  if (state.trainerReadyTimer) {
+    clearTimeout(state.trainerReadyTimer);
+    state.trainerReadyTimer = null;
+  }
+  setTrainerAnswerReady(false);
+  state.trainerReadyTimer = setTimeout(() => {
+    state.trainerReadyTimer = null;
+    setTrainerAnswerReady(true);
+  }, readyDelayMs);
+}
+
+function renderTrainerActionButtons(question, readyDelayMs) {
+  const actions = el("trainer-actions");
+  actions.innerHTML = "";
+  question.available_actions.forEach((action) => {
+    const button = document.createElement("button");
+    button.textContent = action;
+    button.disabled = true;
+    button.addEventListener("click", () => gradeTrainer(action));
+    actions.appendChild(button);
+  });
+  armTrainerAnswerState(readyDelayMs);
+}
+
 function renderTrainerQuestion(question) {
   if (question.street === "flop") {
     renderFlopTrainerQuestion(question);
@@ -968,32 +1279,27 @@ function renderTrainerQuestion(question) {
     facing_4bet: "Facing 4-bet",
   }[question.scenario_type] || "Preflop Spot";
   el("trainer-title").textContent = `${question.hero_position} | ${scenarioLabel}`;
+  renderTrainerActionHistory(question);
   const sizingParts = [];
   if (question.open_size_bb) sizingParts.push(`Open ${formatNumber(question.open_size_bb, 1)} BB`);
   if (question.three_bet_size_bb) sizingParts.push(`3-bet ${formatNumber(question.three_bet_size_bb, 1)} BB`);
   if (question.four_bet_size_bb) sizingParts.push(`4-bet ${formatNumber(question.four_bet_size_bb, 1)} BB`);
   el("trainer-hand").textContent = `Pot ${formatNumber(question.pot_bb, 1)} BB | Call ${formatNumber(question.call_amount_bb, 1)} BB${sizingParts.length ? ` | ${sizingParts.join(" | ")}` : ""}`;
   renderTrainerCards(question);
-  renderTrainerTable(question);
+  const readyDelayMs = renderTrainerTable(question);
   el("flop-summary").classList.add("hidden");
   el("flop-summary").innerHTML = "";
   renderTrainerHistoryItems(question.action_history.map((record) => `${record.position} ${record.action} ${formatNumber(record.amount, 1)} BB`));
-  const actions = el("trainer-actions");
-  actions.innerHTML = "";
-  question.available_actions.forEach((action) => {
-    const button = document.createElement("button");
-    button.textContent = action;
-    button.addEventListener("click", () => gradeTrainer(action));
-    actions.appendChild(button);
-  });
+  renderTrainerActionButtons(question, readyDelayMs);
   el("trainer-result").innerHTML = "";
 }
 
 function renderFlopTrainerQuestion(question) {
   el("trainer-title").textContent = `${question.hero_table_position} | ${question.pot_type}`;
+  renderTrainerActionHistory(question);
   el("trainer-hand").textContent = `Flop ${formatFlopCards(question.flop_cards)} | Pot ${formatNumber(question.pot_bb, 1)} BB`;
   renderTrainerCards(question);
-  renderTrainerTable(question);
+  const readyDelayMs = renderTrainerTable(question);
   const summary = el("flop-summary");
   summary.classList.remove("hidden");
   summary.innerHTML = `
@@ -1024,14 +1330,7 @@ function renderFlopTrainerQuestion(question) {
       : "Flop: Hero to act",
   ]);
 
-  const actions = el("trainer-actions");
-  actions.innerHTML = "";
-  question.available_actions.forEach((action) => {
-    const button = document.createElement("button");
-    button.textContent = action;
-    button.addEventListener("click", () => gradeTrainer(action));
-    actions.appendChild(button);
-  });
+  renderTrainerActionButtons(question, readyDelayMs);
   el("trainer-result").innerHTML = "";
 }
 
@@ -1041,7 +1340,8 @@ function formatFlopCards(cards) {
 }
 
 async function gradeTrainer(action) {
-  if (!state.trainerQuestion) return;
+  if (!state.trainerQuestion || !state.trainerCanAnswer) return;
+  setTrainerAnswerReady(false);
   el("trainer-status").textContent = "Grading...";
   showLoading("Grading action EV...");
   try {
@@ -1054,6 +1354,7 @@ async function gradeTrainer(action) {
     el("trainer-status").textContent = result.is_correct ? "Correct" : "Review EVs";
   } catch (error) {
     el("trainer-status").textContent = error.message;
+    setTrainerAnswerReady(true);
   } finally {
     hideLoading();
   }
@@ -1209,6 +1510,7 @@ el("trainer-street").addEventListener("change", () => {
   updateTrainerControls();
   state.trainerQuestion = null;
   el("trainer-title").textContent = "No question loaded";
+  el("trainer-action-history").innerHTML = "";
   el("trainer-hand").textContent = "";
   el("trainer-table").innerHTML = "";
   el("trainer-hero-cards").innerHTML = "";
