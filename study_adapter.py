@@ -288,6 +288,13 @@ def _range_grid(
             hero_contribution,
             current_bet,
         )
+        if _use_ev_driven_reraise_strategy(hero_position, action_history):
+            action_values, evs, raise_options = _ev_driven_reraise_actions(
+                action_values,
+                evs,
+                raise_options,
+                call_amount_bb,
+            )
         recommended = _recommended_action(action_values, evs)
         items.append(
             {
@@ -329,11 +336,7 @@ def _action_evs_from_equity(
     if "Check" in actions:
         evs["Check"] = equity * pot_bb
     if "Call" in actions:
-        evs["Call"] = (
-            equity * (pot_bb + call_amount_bb) - call_amount_bb
-            if actions.get("Call", 0.0) > 0.0
-            else -999.0
-        )
+        evs["Call"] = equity * (pot_bb + call_amount_bb) - call_amount_bb
 
     raise_evs: dict[str, float] = {}
     all_in_evs: dict[str, float] = {}
@@ -364,14 +367,87 @@ def _action_evs_from_equity(
         else:
             raise_evs[label] = raw_raise_ev
     if "Raise" in actions:
-        evs["Raise"] = max(raise_evs.values(), default=-999.0) if actions.get("Raise", 0.0) > 0.0 else -999.0
+        evs["Raise"] = max(raise_evs.values(), default=-999.0)
     if "All-in" in actions:
-        evs["All-in"] = max(all_in_evs.values(), default=-999.0) if actions.get("All-in", 0.0) > 0.0 else -999.0
+        evs["All-in"] = max(all_in_evs.values(), default=-999.0)
     raise_options = [
         *_raise_options(raise_evs, actions.get("Raise", 0.0)),
         *_raise_options(all_in_evs, actions.get("All-in", 0.0)),
     ]
     return evs, raise_options
+
+
+def _use_ev_driven_reraise_strategy(hero_position: Position, action_history) -> bool:
+    raise_count = sum(1 for record in action_history if record.action == Action.RAISE)
+    return raise_count >= 2 and _is_cold_facing_reraise(hero_position, action_history)
+
+
+def _ev_driven_reraise_actions(
+    actions: dict[str, float],
+    evs: dict[str, float],
+    raise_options: list[dict],
+    call_amount_bb: float,
+) -> tuple[dict[str, float], dict[str, float], list[dict]]:
+    adjusted_evs = dict(evs)
+    if "Call" in adjusted_evs:
+        adjusted_evs["Call"] -= _cold_call_realization_penalty(call_amount_bb)
+
+    fold_ev = adjusted_evs.get("Fold", 0.0)
+    playable_evs = {
+        action: ev
+        for action, ev in adjusted_evs.items()
+        if action != "Fold"
+        and action in actions
+        and ev > fold_ev
+    }
+    if not playable_evs:
+        folded_actions = {name: 0.0 for name in actions}
+        folded_actions["Fold"] = 100.0
+        return folded_actions, adjusted_evs, []
+
+    mixed = mixed_frequencies_from_named_evs(playable_evs)
+    solved_actions = {name: 0.0 for name in actions}
+    solved_actions["Fold"] = 0.0
+    for action, frequency in mixed.items():
+        solved_actions[action] = frequency
+
+    solved_raise_options = _scale_raise_options_by_action_frequency(
+        raise_options,
+        solved_actions,
+    )
+    return solved_actions, adjusted_evs, solved_raise_options
+
+
+def _cold_call_realization_penalty(call_amount_bb: float) -> float:
+    return max(0.45, min(2.25, call_amount_bb * 0.12))
+
+
+def _scale_raise_options_by_action_frequency(raise_options: list[dict], actions: dict[str, float]) -> list[dict]:
+    grouped: dict[str, list[dict]] = {"Raise": [], "All-in": []}
+    for option in raise_options:
+        label = str(option.get("label", ""))
+        if label.startswith("All-in"):
+            grouped["All-in"].append(option)
+        elif label.startswith("Raise"):
+            grouped["Raise"].append(option)
+
+    scaled: list[dict] = []
+    for action_name, options in grouped.items():
+        total_frequency = actions.get(action_name, 0.0)
+        if total_frequency <= 0.0 or not options:
+            continue
+        option_evs = {option["label"]: option["ev"] for option in options}
+        option_mix = mixed_frequencies_from_named_evs(option_evs)
+        best_label = max(option_evs, key=lambda label: option_evs[label])
+        for option in options:
+            scaled.append(
+                {
+                    **option,
+                    "frequency": option_mix.get(option["label"], 0.0) / 100.0 * total_frequency,
+                    "is_best": option["label"] == best_label,
+                }
+            )
+    return scaled
 
 
 def _preflop_action_profile(
@@ -620,7 +696,6 @@ def _cold_facing_three_bet_action_profile(
     call_frequency = _cold_three_bet_trap_call_frequency(hand_class)
     call_frequency = min(call_frequency, max(0.0, 100.0 - raise_frequency))
     fold_frequency = max(0.0, 100.0 - raise_frequency - call_frequency)
-
     raise_score = three_bet_raise_suitability(hand_class, opener_position, three_bettor_position)
     call_score = three_bet_call_suitability(hand_class, opener_position, three_bettor_position)
     pot_odds = call_amount_bb / max(0.01, pot_bb + call_amount_bb)
@@ -650,12 +725,14 @@ def _cold_facing_three_bet_action_profile(
 
 
 def _cold_three_bet_trap_call_frequency(hand_class) -> float:
-    trap_calls = {
-        "AA": 6.0,
-        "KK": 4.0,
-        "AKs": 2.0,
-    }
-    return trap_calls.get(hand_class.name, 0.0)
+    score = hand_strength_score(hand_class)
+    if score >= 88:
+        return 6.0
+    if score >= 85:
+        return 4.0
+    if score >= 82 and hand_class.suited:
+        return 2.0
+    return 0.0
 
 
 def _cold_three_bet_raise_frequency(
@@ -664,27 +741,22 @@ def _cold_three_bet_raise_frequency(
     opener_position: Position,
     three_bettor_position: Position,
 ) -> float:
-    name = hand_class.name
-    base = {
-        "AA": 94.0,
-        "KK": 96.0,
-        "QQ": 85.0,
-        "JJ": 45.0,
-        "TT": 20.0,
-        "AKs": 80.0,
-        "AKo": 65.0,
-        "AQs": 45.0,
-        "AQo": 12.0,
-        "AJs": 18.0,
-        "KQs": 16.0,
-        "A5s": 25.0,
-        "A4s": 22.0,
-        "A3s": 12.0,
-        "A2s": 10.0,
-    }.get(name, 0.0)
+    raise_score = three_bet_raise_suitability(hand_class, opener_position, three_bettor_position)
+    if raise_score >= 96.0:
+        base = 96.0
+    elif raise_score >= 90.0:
+        base = 82.0
+    elif raise_score >= 84.0:
+        base = 58.0
+    elif raise_score >= 78.0:
+        base = 32.0
+    elif raise_score >= 73.0:
+        base = 14.0
+    else:
+        base = 0.0
 
     if opener_position in (Position.UTG, Position.HJ):
-        base *= 0.72
+        base *= 0.72 if raise_score < 96.0 else 1.0
     if three_bettor_position in (Position.SB, Position.BB):
         base *= 1.12
     if hero_position == Position.BTN:
@@ -763,20 +835,23 @@ def _cold_facing_four_bet_action_profile(
 ) -> tuple[dict[str, float], dict[str, float], list[dict]]:
     score = hand_strength_score(hand_class)
     has_all_in = any(_is_all_in_total(amount) for amount in raise_amounts)
-    raise_frequency = 0.0
-    all_in_frequency = 0.0
-    if hand_class.name == "AA":
-        all_in_frequency = 90.0 if has_all_in else 0.0
-        raise_frequency = 10.0 if has_all_in else 100.0
-    elif hand_class.name == "KK":
-        all_in_frequency = 76.0 if has_all_in else 0.0
-        raise_frequency = 14.0 if has_all_in else 90.0
-    elif hand_class.name in ("AKs", "QQ"):
-        all_in_frequency = 42.0 if has_all_in else 0.0
-        raise_frequency = 18.0 if has_all_in else 60.0
-    elif hand_class.name in ("AKo", "A5s"):
-        all_in_frequency = 16.0 if has_all_in else 0.0
-        raise_frequency = 10.0 if has_all_in else 26.0
+    if score >= 92:
+        total_aggression = 100.0
+    elif score >= 88:
+        total_aggression = 78.0
+    elif score >= 84:
+        total_aggression = 52.0
+    elif score >= 80:
+        total_aggression = 24.0
+    else:
+        total_aggression = 0.0
+
+    if has_all_in:
+        all_in_frequency = total_aggression * (0.90 if score >= 92 else 0.68 if score >= 88 else 0.48)
+        raise_frequency = total_aggression - all_in_frequency
+    else:
+        all_in_frequency = 0.0
+        raise_frequency = total_aggression
 
     fold_frequency = max(0.0, 100.0 - raise_frequency - all_in_frequency)
     pot_odds = call_amount_bb / max(0.01, pot_bb + call_amount_bb)
