@@ -295,9 +295,17 @@
       <section class="main-panel">
         <div class="trainer-spot">
           <h2 id="trainer-title">No question loaded</h2>
-          <p id="trainer-hand"></p>
+          <div id="trainer-action-history" class="trainer-action-history" aria-label="Action history"></div>
+          <div class="trainer-question-layout">
+            <div id="trainer-table" class="trainer-poker-table" aria-label="Trainer action table"></div>
+          </div>
+          <div class="trainer-meta-store hidden">
+            <div id="trainer-hero-cards" class="trainer-card-row"></div>
+            <p id="trainer-hand"></p>
+            <div id="trainer-board-cards" class="trainer-card-row trainer-board-row hidden"></div>
+          </div>
           <div id="flop-summary" class="flop-summary hidden"></div>
-          <ol id="trainer-history" class="history-list"></ol>
+          <ol id="trainer-history" class="history-list trainer-history-raw hidden"></ol>
           <div id="trainer-actions" class="trainer-actions"></div>
         </div>
         <section id="trainer-result" class="table-panel"></section>

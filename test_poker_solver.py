@@ -735,6 +735,29 @@ def test_study_adapter_output_shape():
     assert four_bet_a9s["actions"]["All-in"] == 0.0
     assert four_bet_a9s["recommended"] == "Fold"
 
+    cold_three_bet_data = get_study_view_data(
+        {
+            "hero_position": "BTN",
+            "hero_hand": "AsAh",
+            "simulations": 10,
+            "range_simulations": 5,
+            "action_history": [
+                {"position": "UTG", "action": "raise", "amount": 2.5},
+                {"position": "HJ", "action": "fold", "amount": 0.0},
+                {"position": "CO", "action": "raise", "amount": 7.5},
+            ],
+            "auto_state": True,
+        }
+    )
+    cold_three_bet_aa = next(item for item in cold_three_bet_data["range_grid"] if item["hand"] == "AA")
+    cold_three_bet_kk = next(item for item in cold_three_bet_data["range_grid"] if item["hand"] == "KK")
+    cold_three_bet_66 = next(item for item in cold_three_bet_data["range_grid"] if item["hand"] == "66")
+    assert cold_three_bet_aa["actions"]["Fold"] == 0.0
+    assert cold_three_bet_kk["actions"]["Fold"] == 0.0
+    assert cold_three_bet_aa["actions"]["Raise"] + cold_three_bet_aa["actions"]["Call"] == 100.0
+    assert cold_three_bet_kk["actions"]["Raise"] + cold_three_bet_kk["actions"]["Call"] == 100.0
+    assert cold_three_bet_66["recommended"] == "Fold"
+
     flop_data = get_study_view_data(
         {
             "hero_position": "BTN",
