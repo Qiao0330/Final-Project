@@ -808,6 +808,154 @@ async function loadTrainerQuestion() {
   }
 }
 
+function splitCardText(cardsText) {
+  const compact = String(cardsText || "").replace(/[\s,|]/g, "");
+  const cards = [];
+  for (let index = 0; index + 1 < compact.length; index += 2) {
+    cards.push(compact.slice(index, index + 2));
+  }
+  return cards;
+}
+
+function cardSuitMeta(card) {
+  const suit = String(card || "").slice(-1).toLowerCase();
+  return {
+    c: { className: "suit-club", symbol: "♣" },
+    d: { className: "suit-diamond", symbol: "♦" },
+    h: { className: "suit-heart", symbol: "♥" },
+    s: { className: "suit-spade", symbol: "♠" },
+  }[suit] || { className: "suit-unknown", symbol: "" };
+}
+
+function renderCardTiles(container, cards) {
+  container.innerHTML = "";
+  if (!cards || cards.length === 0) {
+    container.innerHTML = `<div class="trainer-card-empty">No cards</div>`;
+    return;
+  }
+  cards.forEach((card) => {
+    const meta = cardSuitMeta(card);
+    const tile = document.createElement("div");
+    tile.className = `trainer-card-tile ${meta.className}`;
+    tile.innerHTML = `
+      <strong>${escapeHtml(String(card).slice(0, -1).toUpperCase())}</strong>
+      <span>${meta.symbol}</span>
+    `;
+    container.appendChild(tile);
+  });
+}
+
+function actionDisplay(record) {
+  if (!record) {
+    return { action: "waiting", detail: "" };
+  }
+  const action = String(record.action || "").toLowerCase();
+  const amount = Number(record.amount || 0);
+  if (action === "fold") return { action: "fold", detail: "" };
+  if (action === "check") return { action: "check", detail: "" };
+  if (action === "call") return { action: "call", detail: `${formatNumber(amount, 1)} BB` };
+  if (action === "raise" && amount >= EFFECTIVE_STACK_BB - 1) return { action: "all-in", detail: `${formatNumber(amount, 0)} BB` };
+  if (action === "raise") return { action: "raise", detail: `${formatNumber(amount, 1)} BB` };
+  return { action: action || "waiting", detail: amount ? `${formatNumber(amount, 1)} BB` : "" };
+}
+
+function latestActionsBySeat(records = []) {
+  const latest = {};
+  records.forEach((record, index) => {
+    if (!record || !SEATS.includes(record.position)) return;
+    latest[record.position] = { ...record, order: index + 1 };
+  });
+  return latest;
+}
+
+function renderTrainerTable(question) {
+  const table = el("trainer-table");
+  const records = Array.isArray(question.action_history) ? question.action_history : [];
+  const latest = latestActionsBySeat(records);
+  const lastSeat = [...records].reverse().find((record) => SEATS.includes(record.position))?.position;
+  const heroSeat = question.hero_position || question.hero_table_position;
+  const centerLines = [];
+
+  if (question.street === "flop") {
+    centerLines.push(`<span>Flop</span>`);
+    centerLines.push(`<div id="trainer-table-board" class="trainer-table-board"></div>`);
+    centerLines.push(`<strong>Pot ${formatNumber(question.pot_bb, 1)} BB</strong>`);
+    if (question.pfa_action) {
+      const pfaText = question.pfa_action === "bet"
+        ? `${question.pfa_position} bets ${formatNumber(question.pfa_bet_size_bb, 1)} BB`
+        : `${question.pfa_position} checks`;
+      centerLines.push(`<small>${escapeHtml(pfaText)}</small>`);
+    }
+  } else {
+    centerLines.push(`<span>Pot</span>`);
+    centerLines.push(`<strong>${formatNumber(question.pot_bb, 1)} BB</strong>`);
+    centerLines.push(`<small>Call ${formatNumber(question.call_amount_bb, 1)} BB</small>`);
+    if (question.open_size_bb) centerLines.push(`<small>Open ${formatNumber(question.open_size_bb, 1)} BB</small>`);
+    if (question.three_bet_size_bb) centerLines.push(`<small>3-bet ${formatNumber(question.three_bet_size_bb, 1)} BB</small>`);
+    if (question.four_bet_size_bb) centerLines.push(`<small>4-bet ${formatNumber(question.four_bet_size_bb, 1)} BB</small>`);
+  }
+
+  table.innerHTML = `
+    <div class="trainer-felt-center">${centerLines.join("")}</div>
+    ${SEATS.map((seat) => {
+      const record = latest[seat];
+      const display = actionDisplay(record);
+      const classes = [
+        "trainer-seat",
+        `trainer-seat-${seat.toLowerCase()}`,
+        record ? "has-action" : "",
+        record ? `trainer-action-${display.action.replace(/[^a-z-]/g, "")}` : "trainer-action-waiting",
+        seat === heroSeat ? "is-hero" : "",
+        seat === lastSeat ? "is-last-action" : "",
+      ].filter(Boolean).join(" ");
+      const stack = question.stacks?.[seat] ?? (seat === "SB" ? 99.5 : seat === "BB" ? 99 : 100);
+      return `
+        <div class="${classes}" style="--action-order: ${record?.order || 0}">
+          <div class="trainer-seat-top">
+            <span>${escapeHtml(seat)}</span>
+            <strong>${formatNumber(stack, 0)}</strong>
+          </div>
+          <div class="trainer-seat-action">${escapeHtml(display.action)}</div>
+          <div class="trainer-seat-detail">${escapeHtml(display.detail || (record ? "acted" : "not acted"))}</div>
+          ${seat === heroSeat ? `<div class="trainer-seat-cards" aria-label="Hero hand"></div>` : ""}
+        </div>
+      `;
+    }).join("")}
+  `;
+
+  const heroCards = table.querySelector(".trainer-seat-cards");
+  if (heroCards) {
+    renderCardTiles(heroCards, splitCardText(question.hero_hand));
+  }
+
+  if (question.street === "flop") {
+    const board = table.querySelector("#trainer-table-board");
+    if (board) renderCardTiles(board, question.flop_cards || []);
+  }
+}
+
+function renderTrainerCards(question) {
+  renderCardTiles(el("trainer-hero-cards"), splitCardText(question.hero_hand));
+  const board = el("trainer-board-cards");
+  if (question.street === "flop") {
+    board.classList.remove("hidden");
+    renderCardTiles(board, question.flop_cards || []);
+  } else {
+    board.classList.add("hidden");
+    board.innerHTML = "";
+  }
+}
+
+function renderTrainerHistoryItems(items) {
+  const history = el("trainer-history");
+  history.innerHTML = "";
+  items.forEach((text) => {
+    const item = document.createElement("li");
+    item.textContent = text;
+    history.appendChild(item);
+  });
+}
+
 function renderTrainerQuestion(question) {
   if (question.street === "flop") {
     renderFlopTrainerQuestion(question);
@@ -824,16 +972,12 @@ function renderTrainerQuestion(question) {
   if (question.open_size_bb) sizingParts.push(`Open ${formatNumber(question.open_size_bb, 1)} BB`);
   if (question.three_bet_size_bb) sizingParts.push(`3-bet ${formatNumber(question.three_bet_size_bb, 1)} BB`);
   if (question.four_bet_size_bb) sizingParts.push(`4-bet ${formatNumber(question.four_bet_size_bb, 1)} BB`);
-  el("trainer-hand").textContent = `${question.hero_hand} | Pot ${formatNumber(question.pot_bb, 1)} BB | Call ${formatNumber(question.call_amount_bb, 1)} BB${sizingParts.length ? ` | ${sizingParts.join(" | ")}` : ""}`;
+  el("trainer-hand").textContent = `Pot ${formatNumber(question.pot_bb, 1)} BB | Call ${formatNumber(question.call_amount_bb, 1)} BB${sizingParts.length ? ` | ${sizingParts.join(" | ")}` : ""}`;
+  renderTrainerCards(question);
+  renderTrainerTable(question);
   el("flop-summary").classList.add("hidden");
   el("flop-summary").innerHTML = "";
-  const history = el("trainer-history");
-  history.innerHTML = "";
-  question.action_history.forEach((record) => {
-    const item = document.createElement("li");
-    item.textContent = `${record.position} ${record.action} ${formatNumber(record.amount, 1)} BB`;
-    history.appendChild(item);
-  });
+  renderTrainerHistoryItems(question.action_history.map((record) => `${record.position} ${record.action} ${formatNumber(record.amount, 1)} BB`));
   const actions = el("trainer-actions");
   actions.innerHTML = "";
   question.available_actions.forEach((action) => {
@@ -847,7 +991,9 @@ function renderTrainerQuestion(question) {
 
 function renderFlopTrainerQuestion(question) {
   el("trainer-title").textContent = `${question.hero_table_position} | ${question.pot_type}`;
-  el("trainer-hand").textContent = `${question.hero_hand} | Flop ${formatFlopCards(question.flop_cards)} | Pot ${formatNumber(question.pot_bb, 1)} BB`;
+  el("trainer-hand").textContent = `Flop ${formatFlopCards(question.flop_cards)} | Pot ${formatNumber(question.pot_bb, 1)} BB`;
+  renderTrainerCards(question);
+  renderTrainerTable(question);
   const summary = el("flop-summary");
   summary.classList.remove("hidden");
   summary.innerHTML = `
@@ -869,20 +1015,14 @@ function renderFlopTrainerQuestion(question) {
     </div>
   `;
 
-  const history = el("trainer-history");
-  history.innerHTML = "";
-  [
+  renderTrainerHistoryItems([
     question.preflop_summary,
     question.pfa_action === "bet"
       ? `Flop: ${question.pfa_position} bets ${formatNumber(question.pfa_bet_size_bb, 1)} BB`
       : question.pfa_action === "check"
       ? "Flop: preflop aggressor checks"
       : "Flop: Hero to act",
-  ].forEach((text) => {
-    const item = document.createElement("li");
-    item.textContent = text;
-    history.appendChild(item);
-  });
+  ]);
 
   const actions = el("trainer-actions");
   actions.innerHTML = "";
@@ -1070,6 +1210,10 @@ el("trainer-street").addEventListener("change", () => {
   state.trainerQuestion = null;
   el("trainer-title").textContent = "No question loaded";
   el("trainer-hand").textContent = "";
+  el("trainer-table").innerHTML = "";
+  el("trainer-hero-cards").innerHTML = "";
+  el("trainer-board-cards").innerHTML = "";
+  el("trainer-board-cards").classList.add("hidden");
   el("trainer-history").innerHTML = "";
   el("trainer-actions").innerHTML = "";
   el("trainer-result").innerHTML = "";
